@@ -43,6 +43,8 @@ it does not implement or replace any encryption, MLS, codec, or packet format.
   Unused bot-gateway internals are conditionally compiled. Bench entries whose
   sources are not vendored were removed.
 
+- Strict fastdistord mode disables upstream internal connection/WebSocket retries. The application coordinator exclusively owns bounded retry authority; unknown closures cannot silently resume underneath it. Explicit WebSocket I/O failures retain their transient classification.
+
 ## Verification and limits
 
 The application transport tests cover credential-safe diagnostics, endpoint

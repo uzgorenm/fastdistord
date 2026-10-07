@@ -23,3 +23,20 @@ jobs:
       - run: cargo build --locked --release
       - if: runner.os == 'macOS'
         run: scripts/bundle-macos.sh
+      - name: Package private macOS build
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/Fastdistord.app dist/fastdistord-macos-arm64.zip
+      - name: Package private Linux build
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf dist/fastdistord-linux-x86_64.tar.gz -C target/release fastdistord -C "$GITHUB_WORKSPACE" README.md LICENSE
+      - name: Save private build downloads
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastdistord-${{ runner.os }}-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14

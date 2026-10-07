@@ -57,13 +57,36 @@ impl fmt::Debug for VoiceConnection {
 pub enum TransportEvent {
     /// Both the voice connection and negotiated DAVE session are ready.
     Ready,
-    Disconnected(String),
+    Disconnected {
+        message: String,
+        retryable: bool,
+    },
     Speaking {
         user_id: u64,
         speaking: bool,
     },
     DeviceFailure(String),
 }
+
+/// Distinct from protocol/authentication errors; only a previously authorized,
+/// pinned-device recovery episode may retry this failure.
+#[derive(Debug)]
+pub struct AudioOpenFailure;
+impl fmt::Display for AudioOpenFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Could not reopen the selected microphone or speaker")
+    }
+}
+impl std::error::Error for AudioOpenFailure {}
+
+#[derive(Debug)]
+pub struct TransientVoiceFailure;
+impl fmt::Display for TransientVoiceFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Transient voice connection failure")
+    }
+}
+impl std::error::Error for TransientVoiceFailure {}
 
 /// Owns a single call. Dropping it closes privacy gates before stopping its workers.
 pub struct Transport {
@@ -114,7 +137,9 @@ impl Transport {
             driver: Driver::new(voice_config),
             armed: true,
         };
+        let transient_failure = Arc::new(AtomicBool::new(false));
         let status = DriverStatus {
+            transient_failure: transient_failure.clone(),
             alive: alive.clone(),
             events: events.clone(),
         };
@@ -142,13 +167,28 @@ impl Transport {
         }
         match timeout(HANDSHAKE_TIMEOUT, pending.driver.connect(connection)).await {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => bail!("Encrypted Discord voice handshake failed; reconnect to try again"),
-            Err(_) => bail!("Discord voice connection timed out"),
+            Ok(Err(error)) => {
+                let reason = songbird::events::context_data::DisconnectReason::from(&error);
+                if matches!(
+                    reason,
+                    songbird::events::context_data::DisconnectReason::Io
+                        | songbird::events::context_data::DisconnectReason::TimedOut
+                ) {
+                    return Err(TransientVoiceFailure.into());
+                }
+                bail!("Encrypted Discord voice handshake failed; reconnect to try again");
+            }
+            Err(_) => return Err(TransientVoiceFailure.into()),
         }
         // DriverConnect only means transport negotiation completed. Never expose it as ready.
         timeout(DAVE_TIMEOUT, async {
             while !dave_ready.load(Ordering::Acquire) {
                 if !alive.load(Ordering::Acquire) || gate.session() != expected_session {
+                    if gate.session() == expected_session
+                        && transient_failure.load(Ordering::Acquire)
+                    {
+                        return Err(TransientVoiceFailure.into());
+                    }
                     bail!("Discord voice disconnected before end-to-end encryption was ready");
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -162,10 +202,8 @@ impl Transport {
             bail!("Voice connection was superseded");
         }
         // No audio device is opened until the MLS session has been verified ready.
-        let audio = Arc::new(
-            AudioEngine::start(config, gate.clone())
-                .map_err(|_| anyhow!("Could not start the selected microphone or speaker"))?,
-        );
+        let audio =
+            Arc::new(AudioEngine::start(config, gate.clone()).map_err(|_| AudioOpenFailure)?);
         let _ = playback.set(audio.playback());
         let _ = audio_health.set(audio.clone());
         if !dave_ready.load(Ordering::Acquire)
@@ -215,6 +253,9 @@ impl Transport {
         self.audio.set_output_volume(volume);
     }
 
+    pub fn device_config(&self) -> AudioConfig {
+        self.audio.device_config()
+    }
     pub fn diagnostics(&self) -> String {
         let stats = self.audio.stats();
         format!(
@@ -314,9 +355,12 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                 driver.stop();
                 let since = negotiating_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= DAVE_TIMEOUT {
-                    let _ = events.send(TransportEvent::Disconnected(
-                        "DAVE end-to-end encryption could not be renewed; microphone closed".into(),
-                    ));
+                    let _ = events.send(TransportEvent::Disconnected {
+                        message:
+                            "DAVE end-to-end encryption could not be renewed; microphone closed"
+                                .into(),
+                        retryable: false,
+                    });
                     break;
                 }
                 continue;
@@ -388,19 +432,33 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
 
 #[derive(Clone)]
 struct DriverStatus {
+    transient_failure: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     events: UnboundedSender<TransportEvent>,
 }
 #[async_trait]
 impl EventHandler for DriverStatus {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
-        if matches!(ctx, EventContext::DriverDisconnect(_))
-            && self.alive.swap(false, Ordering::AcqRel)
+        if let EventContext::DriverDisconnect(data) = ctx
+            && self.alive.load(Ordering::Acquire)
         {
-            // Never stringify event context: it contains the session ID.
-            let _ = self.events.send(TransportEvent::Disconnected(
-                "Discord voice disconnected; reconnect to continue".into(),
-            ));
+            // Preserve terminal/admin ambiguity. Only explicit I/O/timeout errors
+            // qualify for coordinator recovery; never stringify secret context.
+            let retryable = matches!(
+                data.reason,
+                Some(
+                    songbird::events::context_data::DisconnectReason::Io
+                        | songbird::events::context_data::DisconnectReason::TimedOut
+                )
+            );
+            self.transient_failure.store(retryable, Ordering::Release);
+            if !self.alive.swap(false, Ordering::AcqRel) {
+                return None;
+            }
+            let _ = self.events.send(TransportEvent::Disconnected {
+                message: "Discord voice disconnected.".into(),
+                retryable,
+            });
         }
         None
     }

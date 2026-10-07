@@ -2,12 +2,16 @@ use crate::{
     account::{self, Gateway, GatewayCommand, GatewayEvent, PersonalAccount},
     audio::{self, AudioConfig, TxGate},
     model::*,
-    transport::{Transport, TransportEvent, VoiceConnection},
+    recovery::{AUTHORITY_TIMEOUT, CONNECT_TIMEOUT, Retry, RetryBudget},
+    transport::{
+        AudioOpenFailure, TransientVoiceFailure, Transport, TransportEvent, VoiceConnection,
+    },
 };
 use anyhow::Result;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, mpsc},
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc as async_mpsc;
 type Shared = Arc<Mutex<UiState>>;
@@ -39,6 +43,7 @@ struct PendingVoice {
     channel: u64,
     session: Option<String>,
     server: Option<(String, String)>,
+    allow_initial_connect: bool,
 }
 impl PendingVoice {
     fn take_tokens(&mut self) -> Option<(String, String, String)> {
@@ -68,6 +73,57 @@ fn cancel_voice(
     pending.take();
     transport.take();
 }
+#[derive(Default)]
+struct CallRecovery {
+    info: Option<VoiceConnection>,
+    config: Option<AudioConfig>,
+    retry: Option<Retry>,
+    budget: RetryBudget,
+    device_failure: bool,
+}
+impl CallRecovery {
+    fn revoke(&mut self) {
+        *self = Self::default();
+    }
+    fn authorized(&self, pending: Option<&PendingVoice>) -> bool {
+        matches!((&self.info,&self.config,pending),(Some(info),Some(config),Some(p)) if config.input_device.is_some()&&config.output_device.is_some()&&info.guild_id==p.guild && info.channel_id==p.channel && p.session.as_deref()==Some(info.session_id.as_str()))
+    }
+    fn schedule(&mut self, generation: u64, pending: Option<&PendingVoice>) -> bool {
+        if !self.authorized(pending) {
+            self.retry = None;
+            return false;
+        }
+        self.retry = self.budget.schedule(generation, Instant::now());
+        self.retry.is_some()
+    }
+}
+fn launch_transport(
+    info: VoiceConnection,
+    config: AudioConfig,
+    gate: Arc<TxGate>,
+    id: u64,
+    tx: async_mpsc::Sender<ResultEvent>,
+    events: async_mpsc::UnboundedSender<(u64, TransportEvent)>,
+) -> tokio::task::JoinHandle<()> {
+    let expected_session = gate.session();
+    tokio::spawn(async move {
+        let (event_tx, mut event_rx) = async_mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                if events.send((id, event)).is_err() {
+                    break;
+                }
+            }
+        });
+        let result = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            Transport::connect(info, gate, config, event_tx, expected_session),
+        )
+        .await
+        .unwrap_or_else(|_| Err(TransientVoiceFailure.into()));
+        let _ = tx.send(ResultEvent::Transport(id, result)).await;
+    })
+}
 pub fn spawn(
     state: Shared,
     commands: mpsc::Receiver<Command>,
@@ -95,6 +151,14 @@ pub fn spawn(
     })
 }
 async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: Arc<TxGate>) {
+    let mut recovery = CallRecovery::default();
+    let mut signal_ready = false;
+    let mut signal_resume = None;
+    let mut signal_retry: Option<Retry> = None;
+    let mut signal_budget = RetryBudget::default();
+    let mut signal_deadline: Option<Instant> = None;
+    let mut recovery_tick = tokio::time::interval(Duration::from_millis(100));
+    recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut roster = HashMap::<(u64, u64), (u64, Participant)>::new();
     let mut ui_visible = true;
     let mut repaint: Repaint = None;
@@ -109,19 +173,23 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     let (results_tx, mut results) = async_mpsc::channel(8);
     let (voice_tx, mut voice_events) = async_mpsc::unbounded_channel();
     let mut meter_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    meter_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     enum Incoming {
         Command(Option<Command>),
         Result(Option<ResultEvent>),
         Gateway(Option<GatewayEvent>),
         Voice(Option<(u64, TransportEvent)>),
         Meter,
+        Recovery,
     }
     loop {
         let incoming = tokio::select! {
+            biased;
             command=commands.recv()=>Incoming::Command(command),
-            event=results.recv()=>Incoming::Result(event),
             event=async {if let Some(g)=&mut gateway{g.events.recv().await}else{std::future::pending().await}}=>Incoming::Gateway(event),
+            event=results.recv()=>Incoming::Result(event),
             event=voice_events.recv()=>Incoming::Voice(event),
+            _=recovery_tick.tick(),if signal_retry.is_some()||recovery.retry.is_some()||signal_deadline.is_some()=>Incoming::Recovery,
             _=meter_tick.tick(),if transport.is_some()&&ui_visible&&!gate.is_muted()&&!gate.is_deafened()=>Incoming::Meter,
         };
         match incoming {
@@ -129,6 +197,29 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 let Some(command) = command else {
                     break;
                 };
+                if matches!(
+                    &command,
+                    Command::Connect { .. }
+                        | Command::Logout
+                        | Command::Join { .. }
+                        | Command::Leave
+                        | Command::Reconnect
+                        | Command::Quit
+                ) {
+                    recovery.revoke();
+                    signal_retry = None;
+                    signal_resume = None;
+                    signal_deadline = None;
+                    signal_budget = RetryBudget::default();
+                }
+                #[cfg(target_os = "macos")]
+                if matches!(&command, Command::ConnectSaved { .. }) {
+                    recovery.revoke();
+                    signal_retry = None;
+                    signal_resume = None;
+                    signal_deadline = None;
+                    signal_budget = RetryBudget::default();
+                }
                 match command {
                     Command::SetUiRepaint(callback) => {
                         repaint = Some(callback);
@@ -223,6 +314,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 task.abort();
                             }
                             pending = None;
+                            signal_ready = false;
                             gateway = Some(c.gateway());
                             update(&state, &repaint, |s| {
                                 s.phase = Phase::Reconnecting;
@@ -305,6 +397,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         pending = Some(PendingVoice {
                             guild: guild_id,
                             channel: channel_id,
+                            allow_initial_connect: true,
                             ..Default::default()
                         });
                         update(&state, &repaint, |s| {
@@ -368,7 +461,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             t.mute(value);
                         }
                         update(&state, &repaint, |s| s.muted = value);
-                        send_voice_flags(&gateway, &pending, &state).await;
+                        if may_send_voice_flags(
+                            signal_ready,
+                            transport.is_some(),
+                            recovery.authorized(pending.as_ref()),
+                        ) {
+                            send_voice_flags(&gateway, &pending, &state).await;
+                        }
                     }
                     Command::SetDeafened(value) => {
                         gate.set_deafened(value);
@@ -376,7 +475,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             t.deafen(value);
                         }
                         update(&state, &repaint, |s| s.deafened = value);
-                        send_voice_flags(&gateway, &pending, &state).await;
+                        if may_send_voice_flags(
+                            signal_ready,
+                            transport.is_some(),
+                            recovery.authorized(pending.as_ref()),
+                        ) {
+                            send_voice_flags(&gateway, &pending, &state).await;
+                        }
                     }
                     Command::SetPtt(value) => {
                         gate.set_ptt_enabled(value);
@@ -437,6 +542,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             });
                             continue;
                         }
+                        signal_ready = false;
                         gateway = Some(c.gateway());
                         client = Some(Arc::new(c));
                         update(&state, &repaint, |s| {
@@ -474,6 +580,12 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
                 Some(ResultEvent::Transport(id, result)) if id == join_generation => match result {
                     Ok(t) => {
+                        recovery.config = Some(t.device_config());
+                        recovery.retry = None;
+                        recovery.budget.healthy(Instant::now());
+                        if let (Some(p), Some(info)) = (&mut pending, &recovery.info) {
+                            p.session = Some(info.session_id.clone());
+                        }
                         let intended = snapshot(&state);
                         gate.set_muted(intended.muted);
                         gate.set_deafened(intended.deafened);
@@ -487,37 +599,116 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         });
                     }
                     Err(error) => {
-                        gate.set_suppressed(true);
+                        retire_voice_attempt(id, &mut join_generation, &gate);
+                        if let Some(task) = voice_task.take() {
+                            task.abort();
+                        }
+                        let retrying = retryable_connect_error(&error, recovery.device_failure)
+                            && signal_ready
+                            && recovery.schedule(join_generation, pending.as_ref());
+                        if !retrying {
+                            recovery.revoke();
+                        }
                         update(&state, &repaint, |s| {
-                            s.phase = Phase::Failed;
-                            s.status = error.to_string();
+                            s.phase = if retrying {
+                                Phase::Reconnecting
+                            } else {
+                                Phase::Failed
+                            };
+                            s.status = if retrying {
+                                format!(
+                                    "Retrying the same voice session and devices (attempt {}/5).",
+                                    recovery.budget.attempts()
+                                )
+                            } else {
+                                error.to_string()
+                            };
                         });
                     }
                 },
                 _ => {}
             },
             Incoming::Gateway(event) => match event {
-                Some(GatewayEvent::Ready) => update(&state, &repaint, |s| {
-                    s.phase = Phase::SignalingReady;
-                    s.status = "Account connected. Choose a server.".into();
-                }),
-                Some(GatewayEvent::Closed(message)) => {
+                Some(GatewayEvent::Ready { resumed }) => {
+                    if !resumed && signal_resume.is_some() {
+                        recovery.revoke();
+                        pending = None;
+                    }
+                    signal_ready = true;
+                    signal_retry = None;
+                    signal_resume = None;
+                    signal_deadline = None;
+                    signal_budget.healthy(Instant::now());
+                    let restoring = resumed && recovery.schedule(join_generation, pending.as_ref());
+                    update(&state, &repaint, |s| {
+                        s.phase = if restoring {
+                            Phase::Reconnecting
+                        } else {
+                            Phase::SignalingReady
+                        };
+                        s.status = if restoring {
+                            "Session resumed; restoring the same authorized voice connection."
+                        } else {
+                            "Account connected. Choose a server."
+                        }
+                        .into();
+                    });
+                }
+                Some(GatewayEvent::Closed {
+                    message,
+                    retryable,
+                    resume,
+                }) => {
+                    signal_ready = false;
+                    signal_deadline = None;
                     gate.set_suppressed(true);
-                    transport.take();
-                    join_generation = join_generation.wrapping_add(1);
+                    gate.set_ptt_pressed(None);
                     gate.begin_session();
+                    join_generation = join_generation.wrapping_add(1);
                     if let Some(task) = voice_task.take() {
                         task.abort();
                     }
-                    pending = None;
+                    transport.take();
                     gateway = None;
+                    recovery.retry = None;
+                    signal_resume = if retryable { resume } else { None };
+                    signal_retry = if signal_resume.is_some() && client.is_some() {
+                        signal_budget.schedule(generation, Instant::now())
+                    } else {
+                        None
+                    };
+                    if signal_retry.is_none() {
+                        recovery.revoke();
+                        pending = None;
+                    }
                     update(&state, &repaint, |s| {
-                        s.phase = Phase::Failed;
-                        s.status = message;
+                        s.phase = if signal_retry.is_some() {
+                            Phase::Reconnecting
+                        } else {
+                            Phase::Failed
+                        };
+                        s.status = if signal_retry.is_some() {
+                            format!("{message} Retry {}/5.", signal_budget.attempts())
+                        } else {
+                            format!("{message} Use Reconnect and explicitly Join again.")
+                        };
                         s.participants.clear();
                     });
                 }
                 Some(GatewayEvent::Dispatch { kind, data }) => {
+                    if kind == "VOICE_SERVER_UPDATE"
+                        && let Some(info) = &mut recovery.info
+                        && account::snowflake(&data["guild_id"]) == Some(info.guild_id)
+                    {
+                        if let (Some(endpoint), Some(token)) =
+                            (data["endpoint"].as_str(), data["token"].as_str())
+                        {
+                            info.endpoint = endpoint.into();
+                            info.token = token.into();
+                        } else {
+                            recovery.revoke();
+                        }
+                    }
                     if kind == "VOICE_STATE_UPDATE" {
                         update_roster(&mut roster, &data);
                     }
@@ -530,6 +721,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         {
                             p.server = Some((endpoint.to_owned(), token.to_owned()));
                         } else {
+                            recovery.revoke();
                             cancel_voice(
                                 &gate,
                                 &mut join_generation,
@@ -554,6 +746,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         let own = snapshot(&state).account.as_ref().map(|a| a.id) == user;
                         if own {
                             if channel != Some(p.channel) {
+                                recovery.revoke();
                                 gate.set_suppressed(true);
                                 transport.take();
                                 join_generation = join_generation.wrapping_add(1);
@@ -569,7 +762,25 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 });
                                 pending = None;
                             } else {
-                                p.session = data["session_id"].as_str().map(str::to_owned);
+                                let incoming_session = data["session_id"].as_str();
+                                if recovery.info.as_ref().is_some_and(|info| {
+                                    incoming_session != Some(info.session_id.as_str())
+                                }) {
+                                    recovery.revoke();
+                                    cancel_voice(
+                                        &gate,
+                                        &mut join_generation,
+                                        &mut transport,
+                                        &mut pending,
+                                        &mut voice_task,
+                                    );
+                                    update(&state, &repaint, |s| {
+                                        s.phase = Phase::Failed;
+                                        s.status="Voice ownership changed. Audio stopped; explicitly Join again.".into();
+                                    });
+                                    continue;
+                                }
+                                p.session = incoming_session.map(str::to_owned);
                                 let admin_muted = data["mute"].as_bool().unwrap_or(false)
                                     || data["deaf"].as_bool().unwrap_or(false)
                                     || data["suppress"].as_bool().unwrap_or(false);
@@ -615,6 +826,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         snapshot(&state).account.as_ref().map(|a| a.id),
                     ) && pending.is_some()
                     {
+                        recovery.revoke();
                         gate.set_suppressed(true);
                         transport.take();
                         join_generation = join_generation.wrapping_add(1);
@@ -628,9 +840,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         });
                         pending = None;
                     }
-                    if transport.is_none()
+                    if signal_ready
+                        && recovery.retry.is_none()
+                        && recovery.config.is_none()
+                        && transport.is_none()
                         && voice_task.as_ref().is_none_or(|t| t.is_finished())
                         && let Some(p) = &mut pending
+                        && p.allow_initial_connect
                         && let Some((session_id, endpoint, token)) = p.take_tokens()
                         && let Some(user) = snapshot(&state).account
                     {
@@ -648,28 +864,24 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             output_device: s.selected_output,
                             output_volume: s.output_volume,
                         };
-                        let gate = gate.clone();
-                        let tx = results_tx.clone();
-                        let events = voice_tx.clone();
-                        let id = join_generation;
-                        let expected_session = gate.session();
-                        voice_task = Some(tokio::spawn(async move {
-                            let (event_tx, mut event_rx) = async_mpsc::unbounded_channel();
-                            tokio::spawn(async move {
-                                while let Some(event) = event_rx.recv().await {
-                                    if events.send((id, event)).is_err() {
-                                        break;
-                                    }
-                                }
-                            });
-                            let result =
-                                Transport::connect(info, gate, config, event_tx, expected_session)
-                                    .await;
-                            let _ = tx.send(ResultEvent::Transport(id, result)).await;
-                        }));
+                        p.allow_initial_connect = false;
+                        p.session = Some(info.session_id.clone());
+                        recovery.info = Some(info.clone());
+                        voice_task = Some(launch_transport(
+                            info,
+                            config,
+                            gate.clone(),
+                            join_generation,
+                            results_tx.clone(),
+                            voice_tx.clone(),
+                        ));
                     }
                 }
                 None => {
+                    signal_ready = false;
+                    signal_retry = None;
+                    signal_deadline = None;
+                    recovery.revoke();
                     gate.set_suppressed(true);
                     gate.begin_session();
                     transport.take();
@@ -702,17 +914,112 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             }
                         })
                     }
-                    Some(TransportEvent::Disconnected(message))
-                    | Some(TransportEvent::DeviceFailure(message)) => {
-                        gate.set_suppressed(true);
+                    Some(TransportEvent::Disconnected { message, retryable }) => {
+                        retire_voice_attempt(id, &mut join_generation, &gate);
                         transport.take();
+                        if let Some(task) = voice_task.take() {
+                            task.abort();
+                        }
+                        recovery.device_failure = false;
+                        let retrying = retryable
+                            && signal_ready
+                            && recovery.schedule(join_generation, pending.as_ref());
+                        if !retrying {
+                            recovery.revoke();
+                        }
                         update(&state, &repaint, |s| {
-                            s.phase = Phase::Failed;
-                            s.status = message;
+                            s.phase = if retrying {
+                                Phase::Reconnecting
+                            } else {
+                                Phase::Failed
+                            };
+                            s.status = if retrying {
+                                "Transient voice failure; retrying the same authorized session."
+                                    .into()
+                            } else {
+                                message
+                            };
+                            s.input_level = 0.0;
+                        });
+                    }
+                    Some(TransportEvent::DeviceFailure(message)) => {
+                        retire_voice_attempt(id, &mut join_generation, &gate);
+                        transport.take();
+                        if let Some(task) = voice_task.take() {
+                            task.abort();
+                        }
+                        recovery.device_failure = true;
+                        let retrying =
+                            signal_ready && recovery.schedule(join_generation, pending.as_ref());
+                        if !retrying {
+                            recovery.revoke();
+                        }
+                        update(&state, &repaint, |s| {
+                            s.phase = if retrying {
+                                Phase::Reconnecting
+                            } else {
+                                Phase::Failed
+                            };
+                            s.status = if retrying {
+                                "Audio device interrupted; retrying only the same microphone and speaker.".into()
+                            } else {
+                                message
+                            };
                             s.input_level = 0.0;
                         });
                     }
                     None => {}
+                }
+            }
+            Incoming::Recovery => {
+                let now = Instant::now();
+                if signal_deadline.is_some_and(|deadline| now >= deadline) {
+                    gateway = None;
+                    signal_ready = false;
+                    signal_deadline = None;
+                    signal_retry = if signal_resume.is_some() {
+                        signal_budget.schedule(generation, now)
+                    } else {
+                        None
+                    };
+                    if signal_retry.is_none() {
+                        recovery.revoke();
+                        pending = None;
+                        update(&state, &repaint, |s| {
+                            s.phase = Phase::Failed;
+                            s.status =
+                                "Session recovery exhausted. Reconnect and explicitly Join again."
+                                    .into();
+                        });
+                    }
+                }
+                if signal_retry.is_some_and(|retry| retry.is_due(now, generation)) {
+                    signal_retry = None;
+                    if let (Some(c), Some(resume)) = (&client, signal_resume.clone()) {
+                        gateway = Some(c.resume_gateway(resume));
+                        signal_deadline = Some(now + AUTHORITY_TIMEOUT);
+                    }
+                }
+                if recovery
+                    .retry
+                    .is_some_and(|retry| retry.is_due(now, join_generation))
+                {
+                    recovery.retry = None;
+                    if signal_ready
+                        && recovery.authorized(pending.as_ref())
+                        && let (Some(info), Some(mut config)) =
+                            (recovery.info.clone(), recovery.config.clone())
+                    {
+                        config.output_volume = snapshot(&state).output_volume;
+                        voice_task = Some(launch_transport(
+                            info,
+                            config,
+                            gate.clone(),
+                            join_generation,
+                            results_tx.clone(),
+                            voice_tx.clone(),
+                        ));
+                    }
                 }
             }
             Incoming::Meter => {
@@ -734,6 +1041,27 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     }
     drop(transport);
     drop(gateway);
+}
+fn retire_voice_attempt(expected: u64, current: &mut u64, gate: &TxGate) -> bool {
+    if expected != *current {
+        return false;
+    }
+    gate.set_suppressed(true);
+    gate.set_ptt_pressed(None);
+    gate.begin_session();
+    *current = current.wrapping_add(1);
+    true
+}
+fn retryable_connect_error(error: &anyhow::Error, device_episode: bool) -> bool {
+    error.downcast_ref::<TransientVoiceFailure>().is_some()
+        || (device_episode && error.downcast_ref::<AudioOpenFailure>().is_some())
+}
+fn may_send_voice_flags(
+    signaling_ready: bool,
+    voice_active: bool,
+    authority_current: bool,
+) -> bool {
+    signaling_ready && voice_active && authority_current
 }
 async fn send_voice_flags(
     gateway: &Option<Gateway>,
@@ -930,5 +1258,129 @@ mod tests {
             &json!({"guild_id":"1","user_id":"2","channel_id":null}),
         );
         assert!(roster.is_empty());
+    }
+    fn authorized_recovery() -> (CallRecovery, PendingVoice) {
+        let info = VoiceConnection {
+            guild_id: 1,
+            channel_id: 2,
+            user_id: 3,
+            session_id: "test-session".into(),
+            endpoint: "voice.discord.gg".into(),
+            token: "test-not-a-credential".into(),
+        };
+        (
+            CallRecovery {
+                info: Some(info),
+                config: Some(AudioConfig {
+                    input_device: Some("specific-mic".into()),
+                    output_device: Some("specific-speaker".into()),
+                    output_volume: 0.5,
+                }),
+                ..Default::default()
+            },
+            PendingVoice {
+                guild: 1,
+                channel: 2,
+                session: Some("test-session".into()),
+                server: None,
+                allow_initial_connect: false,
+            },
+        )
+    }
+    #[test]
+    fn revoked_call_cannot_restore_after_resume() {
+        let (mut r, p) = authorized_recovery();
+        assert!(r.schedule(1, Some(&p)));
+        r.revoke();
+        assert!(!r.schedule(1, Some(&p)));
+        assert!(r.retry.is_none());
+    }
+    #[test]
+    fn changed_channel_or_session_never_retries() {
+        let (mut r, mut p) = authorized_recovery();
+        p.channel = 9;
+        assert!(!r.schedule(1, Some(&p)));
+        p.channel = 2;
+        p.session = Some("new-owner".into());
+        assert!(!r.schedule(1, Some(&p)));
+    }
+    #[test]
+    fn recovery_never_invents_default_devices() {
+        let (mut r, p) = authorized_recovery();
+        assert!(r.schedule(1, Some(&p)));
+        let c = r.config.as_ref().unwrap();
+        assert_eq!(c.input_device.as_deref(), Some("specific-mic"));
+        assert_eq!(c.output_device.as_deref(), Some("specific-speaker"));
+        r.config = None;
+        assert!(!r.schedule(1, Some(&p)));
+    }
+    #[test]
+    fn cancelled_generation_cannot_fire_retry() {
+        let (mut r, p) = authorized_recovery();
+        assert!(r.schedule(7, Some(&p)));
+        let retry = r.retry.unwrap();
+        assert!(retry.is_due(retry.at, 7));
+        assert!(!retry.is_due(retry.at, 8));
+    }
+    #[test]
+    fn repeated_device_recovery_is_bounded() {
+        let (mut r, p) = authorized_recovery();
+        for _ in 0..5 {
+            assert!(r.schedule(1, Some(&p)));
+        }
+        assert!(!r.schedule(1, Some(&p)));
+    }
+    #[test]
+    fn mute_controls_never_send_channel_updates_during_replay_or_recovery() {
+        assert!(!may_send_voice_flags(false, false, true));
+        assert!(!may_send_voice_flags(false, true, true));
+        assert!(!may_send_voice_flags(true, false, true));
+        assert!(!may_send_voice_flags(true, true, false));
+        assert!(may_send_voice_flags(true, true, true));
+    }
+    #[test]
+    fn terminal_failure_revokes_future_resumed_authority() {
+        let (mut r, p) = authorized_recovery();
+        r.revoke();
+        assert!(!r.authorized(Some(&p)));
+        assert!(!r.schedule(9, Some(&p)));
+        assert!(!p.allow_initial_connect);
+    }
+    #[test]
+    fn recovery_requires_both_actual_device_ids() {
+        let (mut r, p) = authorized_recovery();
+        r.config.as_mut().unwrap().input_device = None;
+        assert!(!r.authorized(Some(&p)));
+        let (mut r, p) = authorized_recovery();
+        r.config.as_mut().unwrap().output_device = None;
+        assert!(!r.authorized(Some(&p)));
+    }
+    #[test]
+    fn retry_decision_uses_typed_result_not_event_arrival_order() {
+        assert!(retryable_connect_error(
+            &TransientVoiceFailure.into(),
+            false
+        ));
+        assert!(!retryable_connect_error(&AudioOpenFailure.into(), false));
+        assert!(retryable_connect_error(&AudioOpenFailure.into(), true));
+        assert!(!retryable_connect_error(
+            &anyhow::anyhow!("fatal protocol failure"),
+            true
+        ));
+    }
+    #[test]
+    fn result_and_disconnect_orders_charge_one_retry() {
+        for order in [["result", "event"], ["event", "result"]] {
+            let gate = TxGate::default();
+            let mut generation = 7;
+            let (mut recovery, p) = authorized_recovery();
+            for _source in order {
+                if retire_voice_attempt(7, &mut generation, &gate) {
+                    assert!(recovery.schedule(generation, Some(&p)));
+                }
+            }
+            assert_eq!(generation, 8);
+            assert_eq!(recovery.budget.attempts(), 1);
+        }
     }
 }

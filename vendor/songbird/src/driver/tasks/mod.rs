@@ -289,7 +289,11 @@ impl ConnectionRetryData {
             }
             Err(why) => {
                 debug!("Failed to connect for {:?}: {}", self.info.guild_id, why);
-                if let Some(t) = config.driver_retry.retry_in(self.last_wait, self.attempts) {
+                if let Some(t) =
+                    crate::driver::dave_policy::allow_internal_retry(config.require_dave)
+                        .then(|| config.driver_retry.retry_in(self.last_wait, self.attempts))
+                        .flatten()
+                {
                     let remote_ic = interconnect.clone();
                     let idx = self.idx;
 

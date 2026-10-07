@@ -10,7 +10,7 @@
 
 **This is experimental, not a live-validated Discord replacement.** Discord restricts supported personal-user voice authorization to approved partners. The included unofficial adapter is off until you accept its account and maintenance risks locally. It may break or lead to account restrictions. No bot, desktop RPC, browser engine, or official-client fallback is substituted.
 
-There is currently **no published release, Homebrew cask, signed download, or notarized Mac app**. The cloud-built Linux binary has been checked offline; macOS audio, Keychain, shortcuts and real Discord calls still need authorized native testing. Read [what passed and what did not](docs/VERIFICATION.md).
+There is **no public release, Homebrew cask, Developer-ID-signed download, or notarized Mac app**. The private CI workflow packages macOS Apple Silicon and Linux x86_64 downloads after successful builds. The new artifact-upload steps must finish before those downloads exist; see below. macOS audio, Keychain, shortcuts and real Discord calls still need authorized native testing. Read [what passed and what did not](docs/VERIFICATION.md).
 
 ## Voice-first features
 
@@ -19,9 +19,20 @@ There is currently **no published release, Homebrew cask, signed download, or no
 - Mute, deafen, open microphone or hold-to-talk; default muted
 - Microphone/speaker selection, input meter and output volume
 - Tray-based background calling when supported by the desktop
+- Bounded session/device recovery with explicit mute preserved and no fallback microphone
 - Optional macOS Keychain storage; no recording or telemetry
 
 Use headphones. Echo cancellation, noise suppression and automatic gain control are not implemented.
+
+## Private build downloads
+
+Open this repository's [Actions](https://github.com/uzgorenm/fastdistord/actions), choose a successful **Check** run for the desired commit, and look under **Artifacts**. You must be signed into GitHub with access to this private repository. Artifacts expire after14days and are development builds, not published releases.
+
+- **macOS Apple Silicon:** download the macOS artifact, unzip it, then unzip `fastdistord-macos-arm64.zip` to obtain `Fastdistord.app`. It is locally ad-hoc signed, not notarized. Native build/signature checks do not prove microphone or live-call behavior.
+- **Linux x86_64:** download the Linux artifact, unzip it, extract `fastdistord-linux-x86_64.tar.gz`, then run `./fastdistord`. Built on Ubuntu24.04; requires compatible glibc and ALSA/GUI runtime libraries. It is not a universal AppImage.
+- **Windows:** no downloadable build is currently produced or verified.
+
+If the run has no artifacts or is still running, the downloads are not ready. Do not substitute an unverified third-party binary.
 
 ## Build and open
 

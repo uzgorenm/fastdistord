@@ -22,7 +22,7 @@ PTT starts disabled. Modifier-only hotkeys are not used. The global shortcut is 
 
 ## Devices and background use
 
-Choose stable device IDs through their friendly names in Settings. Selections apply on your next Join: leave and rejoin to change devices safely. Removed devices are labeled unavailable. Idle/disconnected mode never captures audio. Device failure stops the current call rather than silently selecting another microphone.
+Choose stable device IDs through their friendly names in Settings. Selections apply on your next Join: leave and rejoin to change devices safely. Removed devices are labeled unavailable. Idle/disconnected mode never captures audio. A device failure closes this audio engine immediately. Recovery retries only the same pinned microphone and speaker IDs with bounded backoff. It never substitutes another device; exhausted retries leave an actionable failure. OS-managed virtual devices can change their underlying physical route outside the app, which still needs hardware testing.
 
 Closing a window keeps an active call running only when a usable tray/menu-bar path exists. Reopen from the tray; choose Quit to exit. Without a functioning tray, ordinary window close exits so the process does not become inaccessible. Audio and global PTT are independent of rendered UI frames.
 
@@ -31,10 +31,10 @@ Closing a window keeps an active call running only when a usable tray/menu-bar p
 - **Account denied:** the unofficial adapter may not be accepted for your account. No MFA/CAPTCHA/protection bypass is provided. Do not repeatedly retry; use official Discord if this route is unavailable.
 - **Rate limited:** stop and wait before retrying. There is no automatic bypass or alternate account attempt.
 - **Signaling connected, voice not ready:** this is not an active call. DAVE must complete; an incompatible/failed session times out with the microphone closed.
-- **Microphone or speaker unavailable:** check OS permissions, connected devices and selected route. On macOS, launch the `.app` containing its microphone usage description. Leave, select a valid device and rejoin.
+- **Microphone or speaker unavailable:** recovery retries the same authorized device IDs; it does not fall back to a different microphone or speaker. Check OS permissions, connected devices and selected route. On macOS, launch the `.app` containing its microphone usage description. Leave, select a valid device and rejoin.
 - **Silent while PTT is enabled:** both explicit unmute and a held talk control are necessary. Server mute/deafen/suppression remains authoritative.
 - **Moved, kicked, or permissions changed:** audio stops. Check access and explicitly choose/join a channel; the app does not undo the server action.
-- **Network interrupted:** choose Reconnect, wait for signaling, and Join again. It does not silently resume microphone transmission.
+- **Network interrupted:** a resumable session is retried with bounded backoff. Missed events are replayed before voice restoration, and any kick, move or permission revocation cancels restoration. No automatic fresh login or channel-rejoin command is sent. Explicit mute is preserved; PTT returns released/unknown. If the session cannot safely resume or retries are exhausted, choose Reconnect and explicitly Join.
 - **Echo or poor speakerphone quality:** use headphones. No AEC/noise suppression/AGC is included.
 - **Unknown/missing participant names:** initial voice snapshots and later updates are supported, but undocumented personal Gateway payloads vary. Unknown identities may display a user ID; this needs live interoperability testing.
 - **Mac security warning:** this project does not ship a notarized download. Do not bypass browser security warnings or trust unexpected third-party binaries. Build locally from reviewed source; ask the maintainer about signing before distribution.
@@ -46,3 +46,9 @@ No raw audio is written to disk. No telemetry or text-chat feature is included. 
 The app contacts Discord's HTTPS API, account Gateway, negotiated Discord voice endpoint and UDP voice server. No project-operated relay or fallback service is used. Dependencies' debug/trace logging is compiled out to prevent sensitive cryptographic diagnostic events.
 
 For bug reports, include platform, app commit, expected/actual behavior, steps and a screenshot with personal information removed. Never include credentials, raw Gateway payloads, session IDs, voice tokens or recordings.
+
+## Recovery boundaries
+
+Transient recovery uses five attempts with1/2/4/8/16-second delays. A retry budget resets only after60seconds of stable success, preventing endless rapid failure loops. Each session-resume attempt has a deadline; authentication failures, invalid sessions, rate limits, unknown/ambiguous disconnects and DAVE failures require explicit action. Voice restoration requires the previously authorized same guild/channel/session and the same pinned devices. Fresh server endpoint updates replace cached voice credentials; cancellation clears them.
+
+Leave, Log out, switching accounts/channels, server move/kick, permission changes and a removed voice endpoint invalidate pending retries immediately. A closed media/session gate prevents an older asynchronous result from restoring audio after a newer action. Selecting a new device still requires an explicit next Join; automatic recovery does not treat a new selection as permission to swap microphones mid-call.

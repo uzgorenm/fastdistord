@@ -211,7 +211,9 @@ impl AuxNetwork {
                 self.config.invalidate_dave();
                 self.dont_send = true;
 
-                if should_reconnect {
+                if should_reconnect
+                    && crate::driver::dave_policy::allow_internal_retry(self.config.require_dave)
+                {
                     drop(interconnect.core.send(CoreMessage::Reconnect));
                 } else {
                     drop(interconnect.core.send(CoreMessage::SignalWsClosure(

@@ -240,8 +240,6 @@ fn select_device(host: &cpal::Host, selector: Option<&str>, input: bool) -> Resu
         })
         .with_context(|| format!("No default {kind} audio device is available"));
     };
-    let mut by_name = None;
-    let mut ambiguous = false;
     for device in host.devices()? {
         if !(if input {
             device.supports_input()
@@ -253,15 +251,8 @@ fn select_device(host: &cpal::Host, selector: Option<&str>, input: bool) -> Resu
         if device.id().is_ok_and(|id| id.to_string() == selector) {
             return Ok(device);
         }
-        if device.to_string() == selector {
-            ambiguous |= by_name.is_some();
-            by_name = Some(device);
-        }
     }
-    if ambiguous {
-        bail!("Multiple {kind} devices are named {selector:?}; select a stable device ID");
-    }
-    by_name.with_context(|| format!("Selected {kind} audio device is unavailable: {selector}"))
+    bail!("Selected {kind} audio device ID is unavailable: {selector}")
 }
 
 fn supported_format(format: SampleFormat) -> bool {
@@ -712,6 +703,7 @@ pub struct AudioEngine {
     shared: Arc<Shared>,
     pub input_sample_rate: u32,
     pub output_sample_rate: u32,
+    device_config: AudioConfig,
 }
 
 impl AudioEngine {
@@ -722,6 +714,13 @@ impl AudioEngine {
         let host = cpal::default_host();
         let input = select_device(&host, config.input_device.as_deref(), true)?;
         let output = select_device(&host, config.output_device.as_deref(), false)?;
+        // Pin the actual devices, including defaults, for this authorized call.
+        // Recovery must never reinterpret "default" as a different microphone.
+        let pinned_config = AudioConfig {
+            input_device: Some(input.id()?.to_string()),
+            output_device: Some(output.id()?.to_string()),
+            output_volume: config.output_volume,
+        };
         let input_config = select_config(&input, true)?;
         let output_config = select_config(&output, false)?;
         let input_rate = input_config.sample_rate();
@@ -784,6 +783,7 @@ impl AudioEngine {
             shared,
             input_sample_rate: input_rate,
             output_sample_rate: output_rate,
+            device_config: pinned_config,
         };
         // Drop(engine) reliably tears down both devices and worker on play error.
         {
@@ -829,6 +829,9 @@ impl AudioEngine {
     }
     pub fn playback(&self) -> PlaybackSink {
         self.playback.clone()
+    }
+    pub fn device_config(&self) -> AudioConfig {
+        self.device_config.clone()
     }
     pub fn meter(&self) -> f32 {
         if self.shared.stopped.load(Ordering::Acquire) || !self.shared.gate.transmit_allowed() {
@@ -1539,6 +1542,7 @@ mod tests {
             shared,
             input_sample_rate: 48_000,
             output_sample_rate: 48_000,
+            device_config: AudioConfig::default(),
         };
         assert_eq!(gate.begin_session(), 1);
         assert_eq!(gate.begin_session(), 2);

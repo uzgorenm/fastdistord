@@ -1,6 +1,6 @@
 # Packaging
 
-Current version: 0.1.0 experimental. There are no published releases, package-manager recipes, notarized builds or automated release uploads.
+Current version: 0.1.0 experimental. There are no published releases, package-manager recipes, notarized builds or automated release uploads. Successful private CI runs retain macOS arm64 ZIP and Linux x86_64 tarball build artifacts for14days. Upload steps must finish before a run has downloads.
 
 ## Reproducible source build
 
@@ -26,4 +26,4 @@ Output: `dist/Fastdistord.app`. The script includes and validates `NSMicrophoneU
 - Review licenses, write version-specific release notes and produce checksums.
 - Obtain explicit approval before publishing, changing repository visibility, signing with persistent credentials or uploading a release.
 
-CI checks Linux and macOS source builds and macOS bundle structure. It does not publish artifacts or claim a live Discord call. There is no updater or download button pointing to nonexistent binaries.
+CI checks Linux and macOS source builds and macOS bundle structure. It retains private Actions build artifacts; it does not publish a GitHub Release or claim a live Discord call. There is no updater or download button pointing to nonexistent binaries.

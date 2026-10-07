@@ -109,6 +109,12 @@ impl From<&ConnectionError> for DisconnectReason {
 
 impl From<&WsError> for DisconnectReason {
     fn from(e: &WsError) -> Self {
+        #[cfg(feature = "tungstenite")]
+        if let WsError::Ws(error) = e {
+            if matches!(error.as_ref(), tokio_tungstenite::tungstenite::Error::Io(_)) {
+                return Self::Io;
+            }
+        }
         Self::WsClosed(match e {
             #[cfg(feature = "tungstenite")]
             WsError::WsClosed(Some(frame)) => match frame.code {

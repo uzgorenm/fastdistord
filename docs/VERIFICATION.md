@@ -5,16 +5,16 @@
 Environment: x86_64 Debian 13, Rust 1.99.0, official native development packages extracted to a workspace-only sysroot. No user Mac was used for implementation or tests.
 
 - `cargo fmt --all -- --check`
-- `cargo test --locked`: **38 passed**, 0 failed
+- `cargo test --locked`: **54 passed**, 0 failed
 - `cargo clippy --locked --all-targets -- -D warnings`: passed
-- `cargo build --locked --release`: passed; final link/build36.87 seconds with dependencies already compiled
-- Five standalone production DAVE policy tests: passed
+- `cargo build --locked --release`: passed; baseline final link/build36.87 seconds with dependencies already compiled; recovery rebuild checked separately
+- Six standalone production DAVE/retry policy tests: passed
 - Native offline GUI smoke: startup, Settings, normal960×660/minimum740×540 resizing, scrolling to Quit and normal window-close clean exit
 - Independent source review rechecked identified lifecycle/privacy problems after fixes
 
 Coverage includes audio mute/PTT/unknown state, queued-sample epochs, stale session revocation, bounded mixing, synthetic duplex resampling, old-device failure/cleanup isolation, credential-safe diagnostics, voice endpoint validation, canceled joins, initial roster updates, permission-event scoping and concurrent PTT publish/focus-clear. DAVE policy tests cover unready/protocol-zero/plaintext refusal and rekey-generation invalidation. They are **not** full handshake, MLS cryptographic or real-network integration tests.
 
-## Measured disconnected release build
+## Measured disconnected baseline release build (26161d9)
 
 Cloud Linux Xvfb with Mesa software rendering, no account connected and no microphone opened:
 
@@ -45,13 +45,23 @@ No connected-silent, active call, hidden active-call, multiuser or official-clie
 
 No Discord account session, real microphone, second participant or live voice channel was used. Supported personal `voice` OAuth access remains restricted to approved partners. The experimental adapter needs explicit informed opt-in, a credential entered locally, a concrete authorized channel/session and a real second participant before live acceptance can be attempted. It may fail or expose the account to policy risk.
 
-This cloud is Linux. No runnable macOS `.app`, native Mac permission validation, Keychain round trip, Mac audio test or Mac performance benchmark was produced. The source includes reproducible build steps and native CI/bundle validation, not a claim that those hardware tests passed. CI results on the remote commit must be checked separately after push.
+This cloud is Linux. The baseline private CI run built and validated a macOS `.app` bundle. It did not retain that bundle as a download. Native Mac microphone permission, Keychain round trip, audio and performance tests were not performed. The source includes reproducible build steps and native CI/bundle validation, not a claim that those hardware tests passed. CI results on the remote commit must be checked separately after push.
 
 ## Remaining high-impact limitations
 
 - Undocumented personal-account protocol may break or be rejected; do not promise Discord compatibility.
 - No AEC, noise suppression or AGC; use headphones.
 - Bluetooth, sleep/wake, packet loss, sustained multiuser DAVE and background PTT need real hardware/live verification.
-- Device changes intentionally require leave/rejoin. Network reconnect is explicit, with no automatic microphone resumption.
+- Selecting different devices intentionally requires an explicit new Join. Same-device failures and resumable transient signaling losses now have bounded automatic recovery; invalid sessions, ambiguous disconnects, server revocation and exhausted retries require explicit action.
 - Native Wayland lacks the selected global shortcut backend; the visible hold control is the fallback.
 - No signed/notarized download or release was published.
+
+## Recovery delta
+
+The recovery implementation adds five-attempt1/2/4/8/16-second backoff, a60-second stable-success budget reset, exact session-generation checks and pinned device IDs. Signaling uses Discord Gateway RESUME with the supplied validated Discord resume endpoint; it never automatically falls back to fresh identification. Replayed kick/move/permission events invalidate the voice cache before RESUMED permits restoration. Voice recovery reuses only the same authorized guild/channel/session credentials; it sends no automatic channel-join command. Device recovery reopens only the same logical microphone/speaker IDs, preserving current volume and explicit mute; PTT resets to unknown/released.
+
+New local tests cover backoff exhaustion/stability, canceled retry generations, revoked/session-changed voice authority, missing device pins and resume-endpoint/close-code restrictions. These are offline tests of production decision helpers. No real network interruption, unplug, default-route switch, Bluetooth or sleep/wake recovery was exercised. Automatic recovery is implemented, but hardware/live interoperability remains unverified. OS-managed virtual devices may change their physical backing outside the app.
+
+Protocol reference: [Discord Gateway resume lifecycle](https://docs.discord.com/developers/events/gateway#resuming). Its documented transport rules do not make this personal-account adapter an approved integration.
+
+Baseline CI succeeded on Ubuntu24.04 and macOS14 for remote commit1666044c43a0e20b44fcf2c3f91941200cabc3ea, including tests/release and macOS bundle validation: [verified run](https://github.com/uzgorenm/fastdistord/actions/runs/37679324707). Recovery-delta CI and the newly added private build-artifact upload steps require separate verification after push. No download is claimed ready before its run completes.

@@ -51,7 +51,7 @@ The script validates the microphone usage description and adds a local ad-hoc si
 5. Transmission starts muted. Use headphones; select your intended mode and unmute. Enabling PTT does not itself unmute. Deafen also blocks outgoing audio.
 6. Leave releases capture. Closing the window keeps an active call resident; use the tray to reopen or Quit to exit.
 
-Server mute/deafen/suppression is respected. A server move, channel change or uncertain access stops audio rather than automatically undoing the change. Select/rejoin explicitly after checking access. Device changes apply at the next Join; a device failure stops the call. Account reconnect is explicit after a signaling failure, retaining the safest closed transmit state.
+Server mute/deafen/suppression is respected. A server move, channel change or uncertain access stops audio rather than automatically undoing the change. Select/rejoin explicitly after checking access. Device changes apply at the next Join. Transient network/device failures use bounded recovery of the same authorized session and pinned devices; mute is preserved and PTT is reset. Invalid/ambiguous sessions, server revocation and exhausted retries require explicit reconnect/rejoin. See [Recovery boundaries](USING.md#recovery-boundaries).
 
 ## Limits
 

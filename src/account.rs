@@ -103,7 +103,10 @@ impl PersonalAccount {
             .collect())
     }
     pub fn gateway(&self) -> Gateway {
-        Gateway::spawn(Zeroizing::new(self.token.to_string()))
+        Gateway::spawn(Zeroizing::new(self.token.to_string()), None)
+    }
+    pub fn resume_gateway(&self, resume: GatewayResume) -> Gateway {
+        Gateway::spawn(Zeroizing::new(self.token.to_string()), Some(resume))
     }
 }
 pub fn snowflake(value: &Value) -> Option<u64> {
@@ -131,10 +134,33 @@ pub enum GatewayCommand {
     },
     Close,
 }
+#[derive(Clone)]
+pub struct GatewayResume {
+    session_id: Zeroizing<String>,
+    sequence: u64,
+    url: String,
+}
+#[derive(Debug)]
+struct TerminalGateway;
+impl std::fmt::Display for TerminalGateway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Gateway requires explicit account reconnection")
+    }
+}
+impl std::error::Error for TerminalGateway {}
 pub enum GatewayEvent {
-    Ready,
-    Dispatch { kind: String, data: Value },
-    Closed(String),
+    Ready {
+        resumed: bool,
+    },
+    Dispatch {
+        kind: String,
+        data: Value,
+    },
+    Closed {
+        message: String,
+        retryable: bool,
+        resume: Option<GatewayResume>,
+    },
 }
 pub struct Gateway {
     pub commands: mpsc::Sender<GatewayCommand>,
@@ -147,12 +173,26 @@ impl Drop for Gateway {
     }
 }
 impl Gateway {
-    fn spawn(token: Zeroizing<String>) -> Self {
+    fn spawn(token: Zeroizing<String>, resume: Option<GatewayResume>) -> Self {
         let (tx, rx) = mpsc::channel(16);
         let (event_tx, event_rx) = mpsc::channel(128);
         let task = tokio::spawn(async move {
-            if gateway_loop(token, rx, event_tx.clone()).await.is_err() {
-                let _=event_tx.send(GatewayEvent::Closed("Discord signaling disconnected. Reconnect your account; microphone has been stopped.".into())).await;
+            let mut session = resume;
+            if let Err(error) = gateway_loop(token, rx, event_tx.clone(), &mut session).await {
+                let retryable =
+                    error.downcast_ref::<TerminalGateway>().is_none() && session.is_some();
+                let _ = event_tx
+                    .send(GatewayEvent::Closed {
+                        message: if retryable {
+                            "Discord signaling interrupted; attempting a bounded session resume."
+                        } else {
+                            "Discord signaling stopped; explicit account reconnection is required."
+                        }
+                        .into(),
+                        retryable,
+                        resume: if retryable { session } else { None },
+                    })
+                    .await;
             }
         });
         Self {
@@ -166,36 +206,51 @@ async fn gateway_loop(
     token: Zeroizing<String>,
     mut commands: mpsc::Receiver<GatewayCommand>,
     events: mpsc::Sender<GatewayEvent>,
+    session: &mut Option<GatewayResume>,
 ) -> Result<()> {
-    let (socket, _) = connect_async_with_config(
-        "wss://gateway.discord.gg/?v=10&encoding=json",
-        Some(
-            WebSocketConfig::default()
-                .max_message_size(Some(8 * 1024 * 1024))
-                .max_frame_size(Some(8 * 1024 * 1024)),
+    let (socket, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        connect_async_with_config(
+            session
+                .as_ref()
+                .map(|r| r.url.as_str())
+                .unwrap_or("wss://gateway.discord.gg/?v=10&encoding=json"),
+            Some(
+                WebSocketConfig::default()
+                    .max_message_size(Some(8 * 1024 * 1024))
+                    .max_frame_size(Some(8 * 1024 * 1024)),
+            ),
+            true,
         ),
-        true,
     )
-    .await?;
+    .await??;
     let (mut write, mut read) = socket.split();
     let first = tokio::time::timeout(std::time::Duration::from_secs(15), read.next())
         .await?
         .context("Gateway closed")??;
-    let hello: Value = serde_json::from_str(first.to_text()?)?;
+    let hello: Value = serde_json::from_str(first.to_text().map_err(|_| TerminalGateway)?)
+        .map_err(|_| TerminalGateway)?;
     if hello["op"] != 10 {
-        bail!("Expected Gateway Hello");
+        return Err(TerminalGateway.into());
     }
     let ms = hello["d"]["heartbeat_interval"]
         .as_u64()
         .filter(|n| (1000..=120000).contains(n))
-        .context("Invalid heartbeat interval")?;
+        .ok_or(TerminalGateway)?;
     // User-account wire format is undocumented and may change. No bot intents or spoofed official build.
-    let identify = json!({"op":2,"d":{"token":token.as_str(),"properties":{"os":std::env::consts::OS,"browser":"fastdistord","device":"fastdistord"},"compress":false,"large_threshold":50}});
+    let identify = match session.as_ref() {
+        Some(resume) => {
+            json!({"op":6,"d":{"token":token.as_str(),"session_id":resume.session_id.as_str(),"seq":resume.sequence}})
+        }
+        None => {
+            json!({"op":2,"d":{"token":token.as_str(),"properties":{"os":std::env::consts::OS,"browser":"fastdistord","device":"fastdistord"},"compress":false,"large_threshold":50}})
+        }
+    };
     write
         .send(Message::Text(identify.to_string().into()))
         .await?;
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(ms));
-    let mut seq: Option<u64> = None;
+    let mut seq: Option<u64> = session.as_ref().map(|r| r.sequence);
     let mut ack = true;
     enum Incoming {
         Heartbeat,
@@ -240,9 +295,12 @@ async fn gateway_loop(
                         if text.len() > 8 * 1024 * 1024 {
                             bail!("Gateway frame too large");
                         }
-                        let v: Value = serde_json::from_str(&text)?;
+                        let v: Value = serde_json::from_str(&text).map_err(|_| TerminalGateway)?;
                         if let Some(s) = v["s"].as_u64() {
                             seq = Some(s);
+                            if let Some(resume) = session.as_mut() {
+                                resume.sequence = s;
+                            }
                         }
                         match v["op"].as_u64() {
                             Some(11) => ack = true,
@@ -251,18 +309,34 @@ async fn gateway_loop(
                                     .send(Message::Text(json!({"op":1,"d":seq}).to_string().into()))
                                     .await?
                             }
-                            Some(7) | Some(9) => {
-                                bail!("Gateway requested reconnect or rejected session")
-                            }
+                            Some(7) => bail!("Gateway requested resume"),
+                            Some(9) => return Err(TerminalGateway.into()),
                             Some(0) => {
                                 let kind = v["t"].as_str().unwrap_or_default();
                                 if kind == "READY" {
-                                    events.send(GatewayEvent::Ready).await?;
+                                    if let (Some(id), Some(sequence)) =
+                                        (v["d"]["session_id"].as_str(), seq)
+                                    {
+                                        *session = Some(GatewayResume {
+                                            session_id: Zeroizing::new(id.to_owned()),
+                                            sequence,
+                                            url: validated_resume_url(
+                                                v["d"]["resume_gateway_url"].as_str(),
+                                            )
+                                            .ok_or(TerminalGateway)?,
+                                        });
+                                    } else {
+                                        return Err(TerminalGateway.into());
+                                    }
+                                    events.send(GatewayEvent::Ready { resumed: false }).await?;
                                     if let Some(guilds) = v["d"]["guilds"].as_array() {
                                         for guild in guilds.iter().take(250) {
                                             emit_initial_voice_states(guild, &events).await?;
                                         }
                                     }
+                                }
+                                if kind == "RESUMED" {
+                                    events.send(GatewayEvent::Ready { resumed: true }).await?;
                                 }
                                 if kind == "GUILD_CREATE" {
                                     emit_initial_voice_states(&v["d"], &events).await?;
@@ -291,12 +365,39 @@ async fn gateway_loop(
                         }
                     }
                     Message::Ping(v) => write.send(Message::Pong(v)).await?,
-                    Message::Close(_) => bail!("Gateway closed"),
+                    Message::Close(frame) => {
+                        if !gateway_close_is_retryable(frame.as_ref().map(|f| u16::from(f.code))) {
+                            return Err(TerminalGateway.into());
+                        }
+                        bail!("Gateway transport closed");
+                    }
                     _ => {}
                 }
             }
         }
     }
+}
+fn validated_resume_url(value: Option<&str>) -> Option<String> {
+    let url = reqwest::Url::parse(value?).ok()?;
+    let host = url.host_str()?;
+    if url.scheme() != "wss"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some_and(|p| p != 443)
+        || !(host == "gateway.discord.gg"
+            || (host.starts_with("gateway-") && host.ends_with(".discord.gg")))
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(format!("wss://{host}/?v=10&encoding=json"))
+}
+fn gateway_close_is_retryable(code: Option<u16>) -> bool {
+    // Only transport-level closures. Unknown application codes, invalid sessions,
+    // auth failures and rate limits require explicit action, never fresh identify.
+    matches!(code, None | Some(1001 | 1006 | 1011 | 1012 | 1013 | 4000))
 }
 /// Forward only voice/member-name data, not the full READY guild payload.
 async fn emit_initial_voice_states(
@@ -344,5 +445,31 @@ mod tests {
     async fn opt_in_is_required_before_network() {
         let result = PersonalAccount::connect("never-transmitted".into(), false).await;
         assert!(result.is_err());
+    }
+    #[test]
+    fn gateway_retry_classification_never_reauthenticates_or_bypasses_limits() {
+        for code in [
+            4003, 4004, 4007, 4008, 4009, 4010, 4011, 4012, 4013, 4014, 1000,
+        ] {
+            assert!(!gateway_close_is_retryable(Some(code)));
+        }
+        for code in [1001, 1006, 1011, 1012, 1013, 4000] {
+            assert!(gateway_close_is_retryable(Some(code)));
+        }
+        assert!(gateway_close_is_retryable(None));
+    }
+    #[test]
+    fn resume_credentials_are_restricted_to_discord_gateway() {
+        assert!(validated_resume_url(Some("wss://gateway-us-east1-b.discord.gg")).is_some());
+        for url in [
+            "wss://evil.example",
+            "wss://gateway.discord.gg.evil.example",
+            "wss://user:secret@gateway.discord.gg",
+            "ws://gateway.discord.gg",
+            "wss://gateway.discord.gg/?token=secret",
+            "wss://gateway.discord.gg:444",
+        ] {
+            assert!(validated_resume_url(Some(url)).is_none(), "{url}");
+        }
     }
 }

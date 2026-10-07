@@ -90,3 +90,16 @@ mod tests {
         assert!(allow_receive(false, false, 0, false, &[]));
     }
 }
+
+/// Strict-mode retry authority belongs to the application coordinator.
+pub(crate) fn allow_internal_retry(require_dave: bool) -> bool {
+    !require_dave
+}
+#[cfg(test)]
+mod retry_tests {
+    #[test]
+    fn strict_mode_does_not_hide_internal_retries() {
+        assert!(!super::allow_internal_retry(true));
+        assert!(super::allow_internal_retry(false));
+    }
+}
