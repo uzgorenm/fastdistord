@@ -1,0 +1,53 @@
+[package]
+name = "fastdistord"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+description = "A small, voice-first personal Discord client experiment"
+
+[dependencies]
+anyhow = "1"
+# Davey has TRACE messages containing key material; compile debug/trace out.
+tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
+async-trait = "0.1"
+global-hotkey = "0.8"
+cpal = "0.18.2"
+rtrb = "0.4"
+rubato = "0.16"
+symphonia-core = "0.5.5"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+songbird = { path = "vendor/songbird", default-features = false, features = ["driver", "receive", "rustls", "tungstenite"] }
+egui = "=0.36.1"
+eframe = { version = "=0.36.1", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+fastframe-shell = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-tray = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[patch.crates-io]
+egui = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+eframe = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+emath = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec8284a840cbd8a6f65" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[lints.clippy]
+dbg_macro = "deny"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
