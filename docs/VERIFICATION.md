@@ -1,3 +1,11 @@
+# Solo voice presentation, 2026-10-08
+
+The user confirmed no other participant for the e8cd6ff trace: complete roster 1, decoded Hello/Ready/SessionDescription, protocol 1, key-package send and accepted ExternalSender. This supports a legitimate solo waiting state, not successful multi-peer voice. The earlier multi-peer stall remains unresolved.
+
+The call badge and waiting text now say “Joined · You’re alone” only when the existing authoritative-roster policy allows solo waiting: complete matching roster count 1, no contradictory voice peers and no MLS failure. Unknown, inconsistent or multi-peer observations retain encryption pending. The readiness monitor wakes the UI when that classification changes. Peer arrival resumes the existing bounded encryption deadline; no media stream opens until actual DAVE readiness and native audio startup. Neither protocol nor timeout policy changed. Server channels and private calls both require an encrypted membership exchange; different membership and ringing state can produce different visible waiting behavior.
+
+Format, strict all-target Clippy and 124 offline tests passed (four hardware/socket checks ignored). A UI regression covers unknown, solo, contradictory voice peers, multi-member roster, MLS failure and ready labels. Existing complete-roster/own-channel and peer-arrival deadline regressions remain. Native appearance, peer-arrival interoperability, two-way voice and remembered-login relaunch remain user tests. Actions remain absent; no merge or public release.
+
 # Corrected DAVE contract and remembered login, 2026-10-08
 
 The earlier claim that opcode 26 needed an extra MLSMessage envelope was incorrect. That change in d6dd6d7 is reverted. Official [libdave package serialization](https://github.com/discord/libdave/blob/main/cpp/src/mls/session.cpp), its [ExternalSender consumer](https://github.com/discord/libdave/blob/main/cpp/test/external_sender.cpp), and [discord.js binary transport](https://github.com/discordjs/discord.js/blob/main/packages/voice/src/networking/VoiceWebSocket.ts) establish opcode 26 followed by the bare serialized KeyPackage. Initial and reinit sends now share that contract. Generic MLSMessage parsing was an inappropriate interoperability oracle.

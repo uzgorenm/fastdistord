@@ -353,7 +353,7 @@ impl VoiceApp {
                 tray.set_enabled("leave", has_voice_session(phase));
                 tray.set_tooltip(format!(
                     "fastdistord\n{}\n{}",
-                    phase_label(phase),
+                    voice_phase_label(&sound_state),
                     crate::calls::mic_reason(&sound_state, self.gate.transmit_allowed())
                 ));
             }
@@ -872,13 +872,13 @@ impl VoiceApp {
         } else {
             &self.call_label
         });
-        status_badge(ui, state.phase);
+        status_badge(ui, state);
         ui.add_space(16.0);
         if state.phase != Phase::VoiceReady {
             ui.label(
                 RichText::new(if has_voice_session(state.phase) {
                     if state.phase == Phase::VoiceWaiting {
-                        "Joined. Waiting for an encrypted group; microphone closed."
+                        voice_wait_detail(state)
                     } else {
                         "Connecting encrypted voice…"
                     }
@@ -1453,13 +1453,19 @@ impl VoiceApp {
                     ui.add_space(9.0);
                 }
                 if !state.status.is_empty() {
-                    ui.label(RichText::new(&state.status).size(12.0).color(
-                        if state.phase == Phase::Failed {
+                    ui.label(
+                        RichText::new(if state.phase == Phase::VoiceWaiting {
+                            voice_wait_detail(&state)
+                        } else {
+                            &state.status
+                        })
+                        .size(12.0)
+                        .color(if state.phase == Phase::Failed {
                             theme::DANGER
                         } else {
                             theme::SECONDARY
-                        },
-                    ));
+                        }),
+                    );
                     ui.add_space(7.0);
                 }
                 if state.account.is_some() && state.phase == Phase::Failed {
@@ -1631,6 +1637,22 @@ fn has_voice_session(phase: Phase) -> bool {
     )
 }
 
+fn voice_phase_label(state: &UiState) -> &'static str {
+    if state.phase == Phase::VoiceWaiting && state.voice_handshake.idle_without_peer() {
+        "Joined · You’re alone"
+    } else {
+        phase_label(state.phase)
+    }
+}
+
+fn voice_wait_detail(state: &UiState) -> &'static str {
+    if state.voice_handshake.idle_without_peer() {
+        "You’re alone. Microphone waits for encrypted voice."
+    } else {
+        "Joined. Waiting for encrypted voice; microphone closed."
+    }
+}
+
 fn phase_label(phase: Phase) -> &'static str {
     match phase {
         Phase::Offline => "Offline",
@@ -1662,7 +1684,8 @@ fn section_label(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-fn status_badge(ui: &mut egui::Ui, phase: Phase) {
+fn status_badge(ui: &mut egui::Ui, state: &UiState) {
+    let phase = state.phase;
     let color = match phase {
         Phase::VoiceReady | Phase::SignalingReady => theme::SUCCESS,
         Phase::Connecting | Phase::Joining | Phase::VoiceWaiting | Phase::Reconnecting => {
@@ -1674,7 +1697,11 @@ fn status_badge(ui: &mut egui::Ui, phase: Phase) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
         ui.painter().circle_filled(rect.center(), 3.0, color);
-        ui.label(RichText::new(phase_label(phase)).size(12.0).color(color));
+        ui.label(
+            RichText::new(voice_phase_label(state))
+                .size(12.0)
+                .color(color),
+        );
     });
 }
 
@@ -1952,6 +1979,32 @@ fn draw_icon(size: usize, template: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alone_label_requires_consistent_roster_and_never_claims_media_ready() {
+        let mut state = UiState {
+            phase: Phase::VoiceWaiting,
+            ..Default::default()
+        };
+        assert_eq!(voice_phase_label(&state), "Joined · encryption pending");
+        state.voice_handshake.set_roster_count(Some(1));
+        assert_eq!(voice_phase_label(&state), "Joined · You’re alone");
+        assert!(voice_wait_detail(&state).contains("Microphone waits"));
+        state.voice_handshake.record(songbird::DaveStage::Peers, 2);
+        assert_eq!(voice_phase_label(&state), "Joined · encryption pending");
+        state.voice_handshake.record(songbird::DaveStage::Peers, 1);
+        state.voice_handshake.set_roster_count(Some(2));
+        assert_eq!(voice_phase_label(&state), "Joined · encryption pending");
+        state.voice_handshake.set_roster_count(None);
+        assert_eq!(voice_phase_label(&state), "Joined · encryption pending");
+        state.voice_handshake.set_roster_count(Some(1));
+        state
+            .voice_handshake
+            .record(songbird::DaveStage::MlsFailed, 30);
+        assert_eq!(voice_phase_label(&state), "Joined · encryption pending");
+        state.phase = Phase::VoiceReady;
+        assert_eq!(voice_phase_label(&state), "Voice connected");
+    }
 
     #[test]
     fn clearing_message_editor_revokes_prior_draft_undo_and_redo() {

@@ -372,6 +372,7 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
         let mut installed_epoch = DISARMED_EPOCH;
         let mut deadline = EncryptionDeadline::default();
         let mut media_announced = false;
+        let mut waiting_alone = None;
         while alive.load(Ordering::Acquire) && gate.session() == expected_session {
             tick.tick().await;
             if audio.get().is_some_and(|audio| audio.has_failed()) {
@@ -386,11 +387,15 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                 installed_epoch = DISARMED_EPOCH;
                 driver.mute(true);
                 driver.stop();
-                if media_announced {
+                let alone = handshake.idle_without_peer();
+                // Wake the UI when authoritative membership or voice-peer observations
+                // change the waiting explanation, without opening any audio stream.
+                if media_announced || waiting_alone != Some(alone) {
                     let _ = events.send(TransportEvent::Waiting);
                     media_announced = false;
+                    waiting_alone = Some(alone);
                 }
-                if handshake.idle_without_peer() {
+                if alone {
                     deadline.expired(Instant::now(), true);
                     continue;
                 }
@@ -407,6 +412,7 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                 continue;
             }
             deadline.expired(Instant::now(), true);
+            waiting_alone = None;
             if audio.get().is_none() {
                 let config = match audio_config.lock() {
                     Ok(c) => c.clone(),
