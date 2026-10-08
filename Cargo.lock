@@ -1498,9 +1498,11 @@ dependencies = [
 name = "fastdistord"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
  "block2 0.6.2",
+ "chacha20poly1305",
  "cpal",
  "davey",
  "dispatch2",

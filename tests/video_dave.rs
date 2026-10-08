@@ -395,11 +395,18 @@ fn native_h264_dave_rtp_decode_roundtrip() {
         1200,
     )
     .expect("offline H264 RTP packetization");
+    use fastdistord::media::datagram::{RtpReceiver, RtpSender, TransportMode};
+    use zeroize::Zeroizing;
+    let mut transport_tx = RtpSender::new(TransportMode::Aes256Gcm, Zeroizing::new([7; 32]), 9, 0);
+    let mut transport_rx =
+        RtpReceiver::new(TransportMode::Aes256Gcm, Zeroizing::new([7; 32]), 9, 44);
     let mut receiver = H264Reassembler::new(44, 102, authority).unwrap();
     let mut reconstructed = None;
     for (index, packet) in packets.iter().enumerate() {
+        let datagram = transport_tx.seal_video(packet, authority).unwrap();
+        let authenticated = transport_rx.open(&datagram, authority).unwrap();
         reconstructed = receiver
-            .push(packet.bytes_for(authority).unwrap(), authority)
+            .push(&authenticated, authority)
             .expect("ordered offline reassembly");
         assert_eq!(reconstructed.is_some(), index + 1 == packets.len());
     }
@@ -423,5 +430,117 @@ fn native_h264_dave_rtp_decode_roundtrip() {
             CVPixelBufferGetHeight(&decoded)
         ),
         (320, 180)
+    );
+}
+
+#[test]
+fn dave_rtp_transport_aead_roundtrip_in_both_modes() {
+    use fastdistord::media::{
+        datagram::{RtpReceiver, RtpSender, TransportMode},
+        rtp::{H264Reassembler, RtpMetadata, packetize_h264},
+    };
+    use zeroize::Zeroizing;
+    for mode in [TransportMode::Aes256Gcm, TransportMode::XChaCha20Poly1305] {
+        let mut group = OfflineGroup::new();
+        let authority = VideoAuthority {
+            epoch: 7,
+            ready: true,
+        };
+        let plaintext = h264_sample();
+        let frame = EncodedVideoFrame::new(VideoCodec::H264, plaintext.clone())
+            .unwrap()
+            .encrypt(&mut group.alice, authority)
+            .unwrap();
+        // Synthetic fixture key, never taken from an active audio connection.
+        let mut tx = RtpSender::new(mode, Zeroizing::new([7; 32]), 7, 100);
+        let mut rx = RtpReceiver::new(mode, Zeroizing::new([7; 32]), 7, 44);
+        let mut assembler = H264Reassembler::new(44, 102, authority).unwrap();
+        let packets = packetize_h264(
+            &frame,
+            authority,
+            RtpMetadata {
+                ssrc: 44,
+                payload_type: 102,
+                timestamp: 9000,
+                first_sequence: 0,
+            },
+            1180,
+        )
+        .unwrap();
+        let mut output = None;
+        for packet in packets {
+            let datagram = tx.seal_video(&packet, authority).unwrap();
+            assert!(datagram.len() <= 1200);
+            let authenticated = rx.open(&datagram, authority).unwrap();
+            output = assembler.push(&authenticated, authority).unwrap();
+        }
+        assert_eq!(
+            group
+                .bob
+                .decrypt(101, MediaType::VIDEO, &output.unwrap())
+                .unwrap(),
+            plaintext
+        );
+    }
+}
+
+/// Explicit loopback diagnostic: only synthetic ciphertext on 127.0.0.1.
+/// No Discord, credentials, capture, account signaling or external destination.
+#[test]
+#[ignore = "requires permission to bind/send local UDP sockets"]
+fn synthetic_encrypted_video_over_loopback_udp() {
+    use fastdistord::media::{
+        datagram::{RtpReceiver, RtpSender, TransportMode},
+        rtp::{H264Reassembler, RtpMetadata, packetize_h264},
+    };
+    use std::{net::UdpSocket, time::Duration};
+    use zeroize::Zeroizing;
+    let mut group = OfflineGroup::new();
+    let authority = VideoAuthority {
+        epoch: 7,
+        ready: true,
+    };
+    let plaintext = h264_sample();
+    let frame = EncodedVideoFrame::new(VideoCodec::H264, plaintext.clone())
+        .unwrap()
+        .encrypt(&mut group.alice, authority)
+        .unwrap();
+    let socket_tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let socket_rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket_tx.connect(socket_rx.local_addr().unwrap()).unwrap();
+    socket_rx.connect(socket_tx.local_addr().unwrap()).unwrap();
+    socket_rx
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut tx = RtpSender::new(TransportMode::Aes256Gcm, Zeroizing::new([7; 32]), 7, 0);
+    let mut rx = RtpReceiver::new(TransportMode::Aes256Gcm, Zeroizing::new([7; 32]), 7, 44);
+    let mut assembler = H264Reassembler::new(44, 102, authority).unwrap();
+    let packets = packetize_h264(
+        &frame,
+        authority,
+        RtpMetadata {
+            ssrc: 44,
+            payload_type: 102,
+            timestamp: 9000,
+            first_sequence: 65534,
+        },
+        1180,
+    )
+    .unwrap();
+    let mut output = None;
+    for packet in packets {
+        let datagram = tx.seal_video(&packet, authority).unwrap();
+        assert_eq!(socket_tx.send(&datagram).unwrap(), datagram.len());
+        let mut buffer = [0; 1500];
+        let length = socket_rx.recv(&mut buffer).unwrap();
+        let authenticated = rx.open(&buffer[..length], authority).unwrap();
+        output = assembler.push(&authenticated, authority).unwrap();
+    }
+    assert_eq!(
+        group
+            .bob
+            .decrypt(101, MediaType::VIDEO, &output.unwrap())
+            .unwrap(),
+        plaintext
     );
 }

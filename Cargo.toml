@@ -8,6 +8,9 @@ description = "A small, voice-first personal Discord client experiment"
 
 [dependencies]
 anyhow = "1"
+# Transport AEAD for the separate bounded media pipeline.
+aes-gcm = "=0.10.3"
+chacha20poly1305 = "=0.10.1"
 # Shared codec-aware DAVE implementation for the separate video pipeline.
 davey = "=0.1.4"
 # Davey has TRACE messages containing key material; compile debug/trace out.

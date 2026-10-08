@@ -24,7 +24,7 @@ There is **no public release, Homebrew cask, Developer-ID-signed download, or no
 - Text-channel selection, latest 50 messages, manual refresh and explicit plain-text sending
 - Mac local camera/window preview with explicit source selection and Stop
 
-Voice and text still need a real Discord session to verify. Mac local preview is implemented but needs physical testing. Native synthetic H.264 and offline DAVE/RTP round trips passed; Discord video/screen sending is unfinished. See [media status](docs/MEDIA.md).
+Voice and text still need a real Discord session to verify. Mac local preview is implemented but needs physical testing. Native synthetic H.264 and offline DAVE/RTP/AEAD round trips passed; Discord video/screen sending is unfinished. See [media status](docs/MEDIA.md).
 
 Use headphones. Echo cancellation, noise suppression and automatic gain control are not implemented.
 

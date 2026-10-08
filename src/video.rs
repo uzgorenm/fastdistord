@@ -1,8 +1,9 @@
 //! Encoded video -> DAVE boundary, shared by camera and screen sharing.
 //!
 //! This is an offline pipeline component, not a Discord video transport.
-//! Capture, encoding, codec/SSRC negotiation, RTP packetization, transport AEAD
-//! and receive/decode are not wired into the app. Never send these bytes directly
+//! Native local preview and offline codec/RTP/transport-AEAD helpers are separate.
+//! Discord video signaling and network send/receive are not wired into the app.
+//! Never send these bytes directly
 //! over UDP. A transport must hold its DAVE state lock while checking the current
 //! epoch and ready gate and committing a packet, as the voice path does.
 use std::{borrow::Cow, fmt};

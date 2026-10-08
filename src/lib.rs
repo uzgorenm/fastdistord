@@ -1,4 +1,4 @@
 //! Media components for native camera and screen-sharing work.
-//! The desktop app currently supports voice and plain text only.
+//! Local Mac preview is separate from the offline encrypted video pipeline.
 pub mod media;
 pub mod video;
