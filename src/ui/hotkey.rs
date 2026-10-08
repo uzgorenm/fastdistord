@@ -267,10 +267,10 @@ impl Drop for PlatformHotkey {
         // SAFETY: this is the id of our own live thread and its message queue
         // was created before registration reported success.
         let sent = unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
-        if sent != 0 {
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-            }
+        if sent != 0
+            && let Some(worker) = self.worker.take()
+        {
+            let _ = worker.join();
         }
     }
 }
