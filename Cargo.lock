@@ -36,6 +36,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -50,6 +51,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1498,6 +1500,7 @@ dependencies = [
 name = "fastdistord"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "anyhow",
  "async-trait",
@@ -1513,6 +1516,7 @@ dependencies = [
  "fastframe-text",
  "fastframe-tray",
  "futures-util",
+ "ghash",
  "global-hotkey",
  "objc2 0.6.5",
  "objc2-av-foundation",
@@ -1525,6 +1529,7 @@ dependencies = [
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
+ "polyval",
  "reqwest",
  "rtrb",
  "rubato",
@@ -1924,6 +1929,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -4280,6 +4286,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]

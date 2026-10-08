@@ -1,6 +1,6 @@
 # Local media and Discord video status
 
-The Mac app has a **Local preview** tab for a selected camera or window. It does not send video to Discord. Preview works without signing in. Camera permission is requested only through its explicit button; starting the camera is a separate action. Window selection uses Apple's ScreenCaptureKit picker on macOS 14 or later, with screen audio disabled. Stop, changing tabs, hiding the window, logout and quit release capture and preview frames.
+The Mac app has a **Local preview** tab for a selected camera or window. It does not send video to Discord. Preview works without signing in. Camera permission is requested only through its explicit button; starting the camera is a separate action. Window selection uses Apple's ScreenCaptureKit picker on macOS 14 or later, with screen audio disabled. Stop, changing tabs, hiding/minimizing/occluding the window, logout and quit release capture and preview frames.
 
 Capture retains one bounded BGRA frame in memory. It does not record media. Physical camera/window preview and permission behavior have not been verified on this Mac because the app-opening computer-use request was canceled. Open the local bundle manually to perform those checks with safe content. League interactions and overlay work are stopped.
 
@@ -10,7 +10,7 @@ Capture retains one bounded BGRA frame in memory. It does not record media. Phys
 - VideoToolbox H.264 encoding/decoding, bounded AVCC/Annex B conversion and synthetic checkerboard validation passed a headless native test. Sessions currently encode standalone keyframes; sustained real-time performance is not established.
 - Codec-aware Davey encryption passed real two-participant MLS tests for H.264 and VP8, in both directions, with tamper/replay rejection and participant removal.
 - Bounded RFC 6184 single-NAL/FU-A RTP packetization and ordered reassembly preserve the encrypted frame and reject stale epochs and discontinuities. These are offline helpers with caller-supplied metadata.
-- Transport AES256-GCM and XChaCha20-Poly1305 RTP-size modes authenticate headers and payload, burn each nonce once, refuse wraparound and maintain a bounded authenticated replay window. Only typed DAVE-encrypted video packets enter the public sender. Fixed RTP headers only; unsupported extensions, CSRCs and padding fail closed.
+- Transport AES256-GCM and XChaCha20-Poly1305 RTP-size modes authenticate headers and payload, burn each nonce once, refuse wraparound and maintain a bounded authenticated replay window. Only typed DAVE-encrypted video packets enter the public sender. Expanded AES/GHASH state uses upstream zeroize-on-drop features. Fixed RTP headers only; unsupported extensions, CSRCs and padding fail closed.
 - A synthetic DAVE/RTP/AEAD round trip passed over two loopback UDP sockets. No Discord or external destination was used.
 - The composed native test passed: generated frame → H.264 → DAVE → RTP → transport AEAD → authentication → reassembly → DAVE decryption → native decoding → pixel-fidelity check. It captured no camera/screen content and used no Discord connection.
 

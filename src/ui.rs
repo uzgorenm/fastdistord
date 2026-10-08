@@ -21,6 +21,7 @@ mod theme;
 
 const METER_INTERVAL: Duration = Duration::from_millis(100);
 const TOKEN_EDIT_ID: &str = "session_token";
+const MESSAGE_EDIT_ID: &str = "message_draft";
 
 /// Runs the native window and tray until the user explicitly quits.
 ///
@@ -102,6 +103,7 @@ struct VoiceApp {
     text_open: bool,
     message_draft: String,
     draft_channel: Option<u64>,
+    draft_reset_pending: bool,
     last_sent_revision: u64,
     #[cfg(target_os = "macos")]
     media_open: bool,
@@ -161,6 +163,7 @@ impl VoiceApp {
             text_open: false,
             message_draft: String::new(),
             draft_channel: None,
+            draft_reset_pending: false,
             last_sent_revision: 0,
             #[cfg(target_os = "macos")]
             media_open: false,
@@ -177,6 +180,17 @@ impl VoiceApp {
     }
 
     fn send(&mut self, command: Command) {
+        if matches!(
+            &command,
+            Command::SelectGuild(_)
+                | Command::SelectTextChannel(_)
+                | Command::Logout
+                | Command::Quit
+        ) {
+            self.message_draft.zeroize();
+            self.draft_channel = None;
+            self.draft_reset_pending = true;
+        }
         // Privacy-closing controls act immediately, even if the backend is
         // busy. Opening transmission is left to the authoritative backend.
         match &command {
@@ -206,6 +220,9 @@ impl VoiceApp {
     }
 
     fn background(&mut self, ctx: &egui::Context) {
+        if self.draft_reset_pending {
+            clear_message_editor(ctx);
+        }
         let events: Vec<_> = self.tray.as_ref().map(Tray::events).unwrap_or_default();
         let (muted, deafened, has_account, phase, revision, ptt_enabled) = {
             let state = self
@@ -272,6 +289,7 @@ impl VoiceApp {
         self.hide_intent = false;
         self.release_ptt();
         self.send_shutdown();
+        clear_message_editor(ctx);
         if !self.hidden {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -285,6 +303,8 @@ impl VoiceApp {
             self.gate.fail_closed();
             self.ptt.stop();
             self.token.zeroize();
+            self.message_draft.zeroize();
+            self.draft_reset_pending = true;
             self.release_ptt();
             let _ = self.commands.send(Command::Quit);
         }
@@ -742,15 +762,21 @@ impl VoiceApp {
         }
     }
 
-    fn text_panel(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        if self.draft_channel != state.selected_text_channel {
+    fn sync_text_draft(&mut self, ctx: &egui::Context, state: &UiState) {
+        if self.draft_reset_pending
+            || state.account.is_none()
+            || self.draft_channel != state.selected_text_channel
+            || self.last_sent_revision != state.sent_revision
+        {
             self.message_draft.zeroize();
+            clear_message_editor(ctx);
+            self.draft_reset_pending = false;
             self.draft_channel = state.selected_text_channel;
-        }
-        if self.last_sent_revision != state.sent_revision {
-            self.message_draft.zeroize();
             self.last_sent_revision = state.sent_revision;
         }
+    }
+
+    fn text_panel(&mut self, ui: &mut egui::Ui, state: &UiState) {
         let Some(channel) = state
             .text_channels
             .iter()
@@ -803,6 +829,7 @@ impl VoiceApp {
         ui.add_enabled(
             !state.chat_sending,
             egui::TextEdit::multiline(&mut self.message_draft)
+                .id(egui::Id::new(MESSAGE_EDIT_ID))
                 .char_limit(crate::messaging::MAX_MESSAGE_CHARS)
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
@@ -1050,6 +1077,7 @@ impl VoiceApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let state = self.snapshot();
         let ctx = ui.ctx().clone();
+        self.sync_text_draft(&ctx, &state);
         egui::Panel::top("header")
             .resizable(false)
             .frame(
@@ -1225,6 +1253,10 @@ impl eframe::App for Window {
         }
         self.was_focused = focused;
         if self.was_not_visible != not_visible {
+            #[cfg(target_os = "macos")]
+            if not_visible {
+                self.app.media.stop();
+            }
             self.app.send(Command::SetUiVisible(!not_visible));
         }
         self.was_not_visible = not_visible;
@@ -1239,6 +1271,15 @@ impl eframe::App for Window {
 
     fn persist_egui_memory(&self) -> bool {
         false
+    }
+}
+
+fn clear_message_editor(ctx: &egui::Context) {
+    // Undo points contain prior draft strings. Erasing the visible draft alone
+    // would allow Cmd/Ctrl+Z to restore content from an earlier channel/account.
+    if let Some(mut state) = egui::TextEdit::load_state(ctx, egui::Id::new(MESSAGE_EDIT_ID)) {
+        state.clear_undoer();
+        state.store(ctx, egui::Id::new(MESSAGE_EDIT_ID));
     }
 }
 
@@ -1447,6 +1488,27 @@ fn draw_icon(size: usize, template: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_message_editor_revokes_prior_draft_undo_and_redo() {
+        use egui::{text::CCursorRange, text_edit::TextEditState};
+        let ctx = egui::Context::default();
+        let mut state = TextEditState::default();
+        let empty = (CCursorRange::default(), String::new());
+        let private = (CCursorRange::default(), "private unsent draft".to_owned());
+        let mut undoer = state.undoer();
+        undoer.add_undo(&empty);
+        undoer.add_undo(&private);
+        assert_eq!(undoer.undo(&private), Some(&empty));
+        assert!(undoer.has_redo(&empty));
+        state.set_undoer(undoer);
+        state.store(&ctx, egui::Id::new(MESSAGE_EDIT_ID));
+        clear_message_editor(&ctx);
+        let state = TextEditState::load(&ctx, egui::Id::new(MESSAGE_EDIT_ID)).unwrap();
+        let mut undoer = state.undoer();
+        assert!(undoer.undo(&empty).is_none());
+        assert!(undoer.redo(&empty).is_none());
+    }
 
     #[test]
     fn no_meter_timer_when_idle_muted_deafened_minimized_or_hidden() {

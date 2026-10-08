@@ -40,6 +40,9 @@ impl MediaView {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.capture.poll();
         let state = self.capture.snapshot();
+        if !state.active && !state.pending {
+            self.texture.take();
+        }
         ui.heading("Local preview");
         ui.label(
             "Camera and screen content stays on this Mac. Discord video sending is unavailable.",

@@ -26,13 +26,13 @@ Choose **Text**, select a server and text channel, then read its latest 50 messa
 
 Type plain text and press **Send message**. Enter adds a line rather than sending. Messages are limited to 2000 characters. The app suppresses mentions, text-to-speech and link embeds. Attachments, threads, reactions, edits and direct messages are not supported. Empty-content messages display a placeholder; they may contain unsupported attachments or system content.
 
-Sending disables server/channel changes until the response arrives. A failed send keeps the draft. If its outcome is uncertain, refresh history before retrying to avoid duplicates. Switching text channels or servers clears the unsent draft. Logout cancels pending text work and clears displayed history.
+Sending disables server/channel changes until the response arrives. A failed send keeps the draft. If its outcome is uncertain, refresh history before retrying to avoid duplicates. Switching text channels or servers clears the unsent draft. Logout cancels pending text work and clears displayed history. Channel changes, successful sends and logout also erase the editor undo history, so Undo cannot restore a draft from an earlier scope.
 
 ## Local media preview (Mac)
 
 Open **Local preview** without signing in. For camera preview, choose **Find cameras**, grant access with **Allow camera access**, select a camera and press **Start camera preview**. For a window, choose **Choose window to preview** and select safe content in the native picker (macOS 14 or later). Screen audio is disabled. No preview content is sent to Discord or saved.
 
-**Stop preview**, leaving the tab, hiding the window, logout and quit release capture. **Check codec with synthetic frame** uses generated pixels only. Physical preview and permission handling still require manual verification; see [media status](MEDIA.md).
+**Stop preview**, leaving the tab, hiding, minimizing or occluding the window, logout and quit release capture. Start preview again explicitly when the window is visible. **Check codec with synthetic frame** uses generated pixels only. Physical preview and permission handling still require manual verification; see [media status](MEDIA.md).
 
 ## Devices and background use
 
