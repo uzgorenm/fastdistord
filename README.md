@@ -4,7 +4,7 @@
 
 [Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Contribute](CONTRIBUTING.md)
 
-The sign-in screen offers local session entry or explicit macOS Keychain reconnect. Connected accounts show servers, channels and persistent call controls.
+The sign-in screen offers fresh QR login with mobile approval or explicit macOS Keychain reconnect. Connected accounts show servers, channels and persistent call controls.
 
 ## Download and install
 
@@ -19,15 +19,15 @@ Packages: Mac Apple Silicon DMG, Windows x64 EXE installer, and a Linux amd64 De
 - Choose microphones and speakers, check input levels and adjust output volume
 - Stay in a call from the tray where supported, with bounded device/session recovery
 - Read the latest 50 text-channel messages, refresh and send plain-text messages
-- Enter credentials in a local masked field, with optional macOS Keychain storage
+- Connect with a fresh QR code and mobile approval; optional macOS Keychain storage
 
 The app starts muted and does not record audio or collect telemetry.
 
 ## Open and use
 
 1. Launch Fastdistord. You can explore the offline interface without credentials.
-2. If you choose to connect, read and accept the unofficial-access disclosure in the app.
-3. Enter your credential only in the local masked field. Never send tokens in chat or bug reports, or extract them from another application. Keychain storage is optional.
+2. Read the account-access sentence, then choose **Connect with QR code**.
+3. Scan the fresh code with Discord on your phone and approve there. Only approve a login you started here. Keychain storage is optional; otherwise the session stays in memory.
 4. Choose a server and voice channel, then select **Join**. Allow microphone access if prompted, confirm encrypted voice readiness and unmute when ready.
 5. For push-to-talk, hold **Ctrl+Shift+Space** or the **Talk** button. Select a text channel to read, refresh or send messages.
 6. **Leave** releases audio devices. Closing the window may keep an active call running; **Quit** ends it.

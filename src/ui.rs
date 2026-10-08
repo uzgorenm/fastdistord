@@ -87,7 +87,9 @@ struct VoiceApp {
     token: Zeroizing<String>,
     risk_accepted: bool,
     remember: bool,
-    use_saved: bool,
+    qr_login: Option<crate::qr_login::Login>,
+    qr_code: Option<(qrcode::QrCode, std::time::Instant)>,
+    qr_status: String,
     settings_open: bool,
     selected_input: Option<String>,
     selected_output: Option<String>,
@@ -144,7 +146,9 @@ impl VoiceApp {
             token: Zeroizing::new(String::new()),
             risk_accepted: false,
             remember: false,
-            use_saved: false,
+            qr_login: None,
+            qr_code: None,
+            qr_status: String::new(),
             settings_open: false,
             selected_input: None,
             selected_output: None,
@@ -172,6 +176,10 @@ impl VoiceApp {
     }
 
     fn send(&mut self, command: Command) {
+        if matches!(&command, Command::Logout | Command::Quit) {
+            self.qr_login = None;
+            self.qr_code = None;
+        }
         if matches!(
             &command,
             Command::SelectGuild(_)
@@ -445,101 +453,146 @@ impl VoiceApp {
         ui.add_space(6.0);
         ui.label(RichText::new("Voice and text, in a small native app.").color(theme::SECONDARY));
         ui.add_space(16.0);
-        ui.label("This unofficial adapter may break or lead to account restrictions. Discord prohibits automated personal accounts.");
-        ui.hyperlink_to("Account risk policy", "https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots");
-        ui.add_space(12.0);
-        ui.checkbox(
-            &mut self.risk_accepted,
-            "I understand the risk and want to connect.",
-        );
+        ui.label("This unofficial login gives Fastdistord broad access to your Discord account and may put your account at risk.");
+        ui.collapsing("Details", |ui| {
+            ui.label("This is a personal-account session, not a limited OAuth grant. Discord may restrict your account. Only approve a code you started here. Logout removes local access; use Discord’s device/session controls to revoke access, or change your Discord password to end all sessions.");
+            ui.hyperlink_to("Discord account policy", "https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots");
+        });
         ui.add_space(12.0);
         #[cfg(target_os = "macos")]
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(!self.use_saved, "Session credential")
-                .clicked()
-            {
-                self.use_saved = false;
-            }
-            if ui
-                .selectable_label(self.use_saved, "Use Keychain")
-                .clicked()
-            {
-                self.use_saved = true;
-                self.token.zeroize();
-            }
+        ui.add_enabled_ui(self.qr_login.is_none(), |ui| {
+            ui.checkbox(&mut self.remember, "Remember in macOS Keychain");
         });
+        ui.label(
+            RichText::new(if self.remember {
+                "Saved only after a successful connection."
+            } else {
+                "Session only. Nothing is saved to disk."
+            })
+            .size(12.0)
+            .color(theme::SECONDARY),
+        );
         let connecting = matches!(state.phase, Phase::Connecting | Phase::Reconnecting);
-        if self.use_saved {
-            ui.add_space(8.0);
-            ui.label("Reconnect using a credential you previously saved in this app. Keychain is read only when you choose Connect.");
-            #[cfg(target_os = "macos")]
-            if primary_button(
-                ui,
-                if connecting {
-                    "Connecting…"
-                } else {
-                    "Connect from Keychain"
-                },
-                !connecting && self.risk_accepted,
-            )
-            .clicked()
-            {
-                self.token.zeroize();
-                self.local_error = None;
-                self.send(Command::ConnectSaved {
-                    risk_accepted: true,
-                });
+        let events: Vec<_> = self
+            .qr_login
+            .as_ref()
+            .map(|login| login.events.try_iter().collect())
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                crate::qr_login::Event::Code(code, expires) => {
+                    self.qr_code = Some((code, expires));
+                    self.qr_status = "Scan with Discord on your phone, then approve there.".into();
+                }
+                crate::qr_login::Event::AwaitingApproval => {
+                    self.qr_code = None;
+                    self.qr_status = "Scanned. Approve or cancel on your phone.".into();
+                }
+                crate::qr_login::Event::Token(mut token) => {
+                    self.qr_code = None;
+                    self.qr_login = None;
+                    self.qr_status.clear();
+                    self.send(Command::Connect {
+                        token: std::mem::take(&mut *token),
+                        risk_accepted: true,
+                        remember: self.remember,
+                    });
+                }
+                crate::qr_login::Event::Failed(message) => {
+                    self.qr_code = None;
+                    self.qr_login = None;
+                    self.qr_status = message.into();
+                }
             }
-        } else {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Session credential").strong());
-            ui.add_enabled(
-                !connecting,
+        }
+        if let Some((_, expires)) = &self.qr_code
+            && std::time::Instant::now() >= *expires
+        {
+            self.qr_code = None;
+            self.qr_login = None;
+            self.qr_status = "Code expired. Choose Connect for a fresh code.".into();
+        }
+        if let Some((code, _)) = &self.qr_code {
+            // Four-module quiet zone, integer pixel modules, opaque black/white.
+            let module = (216.0 / (code.width() + 8) as f32).floor().max(1.0);
+            let size = module * (code.width() + 8) as f32;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+            for y in 0..code.width() {
+                for x in 0..code.width() {
+                    if code[(x, y)] == qrcode::Color::Dark {
+                        let pos =
+                            rect.min + Vec2::new((x + 4) as f32 * module, (y + 4) as f32 * module);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(pos, Vec2::splat(module)),
+                            0.0,
+                            Color32::BLACK,
+                        );
+                    }
+                }
+            }
+        }
+        if self.qr_login.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            if ui.button("Cancel login").clicked() {
+                self.qr_login = None;
+                self.qr_code = None;
+                self.qr_status = "Login canceled.".into();
+            }
+        } else if primary_button(ui, "Connect with QR code", !connecting).clicked() {
+            self.token.zeroize();
+            self.risk_accepted = true;
+            self.qr_status = "Creating a fresh login code…".into();
+            match crate::qr_login::Login::start(ui.ctx().clone()) {
+                Ok(login) => self.qr_login = Some(login),
+                Err(_) => {
+                    self.qr_status = "Could not start login. Choose Connect to try again.".into()
+                }
+            }
+        }
+        if !self.qr_status.is_empty() {
+            ui.label(&self.qr_status);
+        }
+        #[cfg(target_os = "macos")]
+        if primary_button(
+            ui,
+            "Connect from Keychain",
+            !connecting && self.qr_login.is_none(),
+        )
+        .clicked()
+        {
+            self.risk_accepted = true;
+            self.send(Command::ConnectSaved {
+                risk_accepted: true,
+            });
+        }
+        ui.collapsing("Use an existing session credential", |ui| {
+            ui.checkbox(
+                &mut self.risk_accepted,
+                "I understand the account-access risk.",
+            );
+            ui.add(
                 egui::TextEdit::singleline(&mut *self.token)
                     .id(egui::Id::new(TOKEN_EDIT_ID))
                     .password(true)
-                    .hint_text("Enter locally; never paste into chat")
-                    .desired_width(f32::INFINITY),
+                    .hint_text("Enter only locally"),
             );
-            #[cfg(target_os = "macos")]
-            ui.checkbox(&mut self.remember, "Remember in macOS Keychain");
-            ui.label(
-                RichText::new(if self.remember {
-                    "Saved to Keychain after a successful connection."
-                } else {
-                    "Session only. Cleared when this app closes."
-                })
-                .size(12.0)
-                .color(theme::SECONDARY),
-            );
-            ui.add_space(8.0);
-            let can_connect = connect_allowed(&self.token, self.risk_accepted, connecting);
             if primary_button(
                 ui,
-                if connecting {
-                    "Connecting…"
-                } else {
-                    "Connect"
-                },
-                can_connect,
+                "Connect",
+                connect_allowed(&self.token, self.risk_accepted, connecting)
+                    && self.qr_login.is_none(),
             )
             .clicked()
             {
                 let token = std::mem::take(&mut *self.token);
-                self.local_error = None;
                 self.send(Command::Connect {
                     token,
                     risk_accepted: true,
                     remember: self.remember,
                 });
             }
-            ui.add_space(8.0);
-            ui.collapsing("Why isn’t there a Discord login button?", |ui| {
-                ui.label("Discord restricts supported voice OAuth to approved partners. Standard OAuth sign-in cannot authorize this voice adapter. No supported credential export or sync from the installed Discord app is provided.");
-                ui.hyperlink_to("Discord OAuth scopes", "https://docs.discord.com/developers/topics/oauth2#oauth2-scopes");
-            });
-        }
+        });
         if let Some(mut edit_state) =
             egui::TextEdit::load_state(ui.ctx(), egui::Id::new(TOKEN_EDIT_ID))
         {
@@ -1040,8 +1093,10 @@ impl VoiceApp {
                         self.token.zeroize();
                         self.risk_accepted = false;
                         self.remember = false;
-                        self.use_saved = false;
+
                         self.browsing_channel = None;
+                        self.qr_login = None;
+                        self.qr_code = None;
                         self.send(Command::Logout);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1173,6 +1228,8 @@ impl Resident for VoiceApp {
     }
 
     fn window_gone(&mut self) {
+        self.qr_login = None;
+        self.qr_code = None;
         self.hidden = true;
         self.send(Command::SetUiVisible(false));
         self.hide_intent = false;
