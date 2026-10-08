@@ -32,7 +32,7 @@ impl PersonalAccount {
             .timeout(std::time::Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .user_agent("fastdistord/0.1 experimental personal voice client")
+            .user_agent(format!("fastdistord/{}", fastdistord::RELEASE_VERSION))
             .build()?;
         let client = Self { token, http };
         let user = client.get("/users/@me").await?;

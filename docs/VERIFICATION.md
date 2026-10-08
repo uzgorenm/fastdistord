@@ -1,3 +1,9 @@
+# Version 0.01 packaging and production UI, 2026-10-08
+
+Current production UI contains account entry, voice and text only. Standalone media previews, codec diagnostics and the audio diagnostics panel were removed; automated/headless media tests remain. Local format, strict Clippy, all 77 deterministic tests and the SemVer 0.0.1 Mac bundle/signature checks passed. The user-facing version is 0.01. Native GUI inspection was not retried after cancellation. Hardware and live Discord behavior remain unverified; the user will perform live testing.
+
+The three-platform packaging workflow builds a Mac DMG, per-user Windows NSIS EXE installer and Linux amd64 Debian package. It verifies package payloads and version startup, including Windows/Linux install and uninstall. The release job gates publication on all three builds and compares downloaded draft assets before publication. See [Packaging](../PACKAGING.md) and the release's exact source/checksum manifests for final release identity. Historical checks below describe earlier revisions and UI.
+
 # Account flow and compact UI follow-up, 2026-10-08
 
 The signed-out view now uses a centered account form instead of empty server and call panels. Session entry and explicit Keychain reconnect have separate tabs. Risk acceptance still gates both actions; changing tabs does not load credentials, and password undo history is cleared on either path. Connected accounts retain channel navigation, participant states, text composition and persistent mute/deafen/PTT/leave controls with tighter spacing. Diagnostic details remain in Settings. The obsolete startup screenshot was removed from the README because it no longer represents the current layout.
@@ -6,7 +12,7 @@ Local format and strict Clippy checks, all 77 deterministic tests, the release b
 
 Current Discord OAuth documentation confirms that the `voice` scope requires approved-partner access. Standard identity/guild OAuth cannot authorize this adapter. No supported installed-client credential export or account sync was added. No credential was read or entered, and no outgoing Discord content was sent.
 
-Computer-use inventory reported Fastdistord and Spotifast running. Read-only selection of the existing Fastdistord app via `cua.getApp("me.uzgoren.fastdistord")` was canceled by the user after 5959.5 seconds, before window content was returned. It was not retried. Visual layout, keyboard traversal, resizing and native accessibility remain unverified for this follow-up; the prior Linux GUI check below applies only to its older UI.
+Computer-use inventory reported Fastdistord running. Read-only selection of the existing Fastdistord app via `cua.getApp("me.uzgoren.fastdistord")` was canceled by the user after 5959.5 seconds, before window content was returned. It was not retried. Visual layout, keyboard traversal, resizing and native accessibility remain unverified for this follow-up; the prior Linux GUI check below applies only to its older UI.
 
 # Native Mac continuation, 2026-10-08
 

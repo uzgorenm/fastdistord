@@ -1,8 +1,8 @@
 # Getting started
 
-A small native Rust/fastframe voice-first Discord client experiment. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, recording, or telemetry.
+A native Rust/fastframe Discord voice and text client. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, recording, or telemetry.
 
-**Experimental and not live-validated.** Discord's supported personal-user `voice` OAuth scope is restricted to approved partners. No qualifying generally available supported route was found for arbitrary existing server channels. This implementation therefore isolates an **unofficial personal-account adapter**, disabled until explicit risk acceptance in the app. It may violate Discord policy, cause account restrictions, or break without notice. It is not affiliated with Discord. Do not use an important account without understanding that risk.
+**Live-call behavior is not yet verified.** Discord's supported personal-user `voice` OAuth scope is restricted to approved partners. No qualifying generally available supported route was found for arbitrary existing server channels. This implementation therefore isolates an **unofficial personal-account adapter**, disabled until explicit risk acceptance in the app. It may violate Discord policy, cause account restrictions, or break without notice. It is not affiliated with Discord. Do not use an important account without understanding that risk.
 
 ## What is implemented
 
@@ -17,7 +17,7 @@ A small native Rust/fastframe voice-first Discord client experiment. macOS Apple
 
 - Plain-text guild messaging: bounded history, manual refresh and explicit Send; mentions and embeds suppressed
 
-Mac local camera/window preview is implemented but awaits physical testing. Discord video and screen sending are unfinished; see [media status](MEDIA.md). League overlay work is stopped.
+Discord video and screen sending are unfinished and are not exposed as working call controls; see [media status](MEDIA.md). League overlay work is stopped.
 
 ## Build
 
@@ -65,7 +65,7 @@ Discord’s standard OAuth scopes can identify an account and list basic guild i
 
 No AEC, noise suppression or automatic gain control. Speakerphone use may echo. Bluetooth routes and sleep/wake require hardware testing. No claim of production-grade background PTT safety: platform key-release reliability still needs live verification; focus/visibility transitions close the gate. Native Wayland global shortcuts are unavailable with the selected backend and use the visible hold-to-talk fallback.
 
-Initial guild voice snapshots and later updates seed the roster, but this experimental adapter does not yet implement every undocumented personal Gateway payload; missing names may display a user ID. Stage channels are excluded. Large servers are bounded to protect memory. Permission/channel updates conservatively stop a call. Not every browser/client capability, account challenge or protocol variation is supported.
+Initial guild voice snapshots and later updates seed the roster, but this adapter does not yet implement every undocumented personal Gateway payload; missing names may display a user ID. Stage channels are excluded. Large servers are bounded to protect memory. Permission/channel updates conservatively stop a call. Not every browser/client capability, account challenge or protocol variation is supported.
 
 Do not treat local tests, a loopback, UDP readiness or a successfully compiled binary as a successful Discord call. See [verification](VERIFICATION.md) and [manual acceptance](LIVE_TEST.md).
 
@@ -75,4 +75,4 @@ Do not treat local tests, a loopback, UDP readiness or a successfully compiled b
 
 MIT project; vendored Songbird retains its ISC license and modification notes. Fastframe/egui/winit, CPAL, Rubato, Opus, Davey and OpenMLS retain their own upstream licenses. No codec or cryptography is reimplemented.
 
-References: [fastframe](https://github.com/crmne/fastframe), [Spotifast architecture](https://github.com/crmne/spotifast), [Discord OAuth scopes](https://docs.discord.com/developers/topics/oauth2), [voice/DAVE protocol](https://docs.discord.com/developers/topics/voice-connections), [Songbird](https://github.com/serenity-rs/songbird), [official libdave](https://github.com/discord/libdave), [Davey](https://github.com/Snazzah/davey).
+References: [fastframe](https://github.com/crmne/fastframe), [Discord OAuth scopes](https://docs.discord.com/developers/topics/oauth2), [voice/DAVE protocol](https://docs.discord.com/developers/topics/voice-connections), [Songbird](https://github.com/serenity-rs/songbird), [official libdave](https://github.com/discord/libdave), [Davey](https://github.com/Snazzah/davey).

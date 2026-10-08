@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod account;
 mod audio;
 mod credential;
@@ -8,17 +10,9 @@ mod runtime;
 mod transport;
 mod ui;
 fn main() -> anyhow::Result<()> {
-    if std::env::args().any(|arg| arg == "--check-native-video") {
-        #[cfg(target_os = "macos")]
-        {
-            fastdistord::media::macos_codec::synthetic_roundtrip(320, 180)?;
-            println!(
-                "Native synthetic H.264 encode/decode passed (320 x 180). No camera or screen captured."
-            );
-            return Ok(());
-        }
-        #[cfg(not(target_os = "macos"))]
-        anyhow::bail!("Native video codec checks require macOS.");
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("fastdistord {}", fastdistord::RELEASE_VERSION);
+        return Ok(());
     }
     let state = std::sync::Arc::new(std::sync::Mutex::new(model::UiState::default()));
     let gate = std::sync::Arc::new(audio::TxGate::default());

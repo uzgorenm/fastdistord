@@ -1,10 +1,10 @@
 [package]
 name = "fastdistord"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
-description = "A small, voice-first personal Discord client experiment"
+description = "A native Discord voice and text client"
 
 [dependencies]
 anyhow = "1"

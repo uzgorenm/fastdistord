@@ -8,13 +8,15 @@ The sign-in screen offers local session entry or explicit macOS Keychain reconne
 
 ## Download and install
 
-Installers for the first release, **0.01**, are being prepared:
+**Version 0.01** — private repository access is required.
 
-- **macOS Apple Silicon:** DMG
-- **Windows:** EXE installer
-- **Linux:** native package
+| Platform | Installer |
+|---|---|
+| macOS Apple Silicon | [DMG](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/Fastdistord-0.01-macos-arm64.dmg) |
+| Windows x64 | [EXE installer](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/Fastdistord-0.01-windows-x64-setup.exe) |
+| Ubuntu 24.04 / compatible Debian amd64 | [Debian package](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/fastdistord-0.01-linux-amd64.deb) |
 
-These installers have not been published yet. Download links will be added here when the private GitHub Release is available. For now, you can [build from source](#build-from-source). Existing Mac app bundles use a local ad-hoc signature and are not notarized.
+[Release and checksums](https://github.com/uzgorenm/fastdistord/releases/tag/v0.01). Mac: open the DMG and drag the app to Applications. Windows: run the installer. Linux: `sudo apt install ./fastdistord-0.01-linux-amd64.deb`. Mac/Windows downloads are not notarized/vendor-signed.
 
 ## Features
 
@@ -23,7 +25,6 @@ These installers have not been published yet. Download links will be added here 
 - Choose microphones and speakers, check input levels and adjust output volume
 - Stay in a call from the tray where supported, with bounded device/session recovery
 - Read the latest 50 text-channel messages, refresh and send plain-text messages
-- Preview a camera or selected window locally on Mac, with explicit Start and Stop controls
 - Enter credentials in a local masked field, with optional macOS Keychain storage
 
 The app starts muted and does not record audio or collect telemetry.
@@ -43,7 +44,7 @@ See the [first-call walkthrough](docs/GETTING_STARTED.md#account-and-first-call)
 
 Personal-account access uses an unofficial integration that may break or lead to Discord account restrictions. Fastdistord is independent and is not affiliated with Discord.
 
-Voice and text are implemented but have not been verified in a live Discord session. Mac camera/window preview still needs physical-device testing. Discord video and screen-share signaling is unfinished, so local previews do not send media to a call. Use headphones: echo cancellation, noise suppression and automatic gain control are not implemented.
+Voice and text still need live testing. Video and screen-share sending are unfinished. Use headphones: echo cancellation, noise suppression and automatic gain control are not implemented.
 
 See [verification status](docs/VERIFICATION.md), [media status](docs/MEDIA.md) and the [live-test checklist](docs/LIVE_TEST.md) for details.
 

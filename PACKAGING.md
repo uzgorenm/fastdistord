@@ -1,31 +1,19 @@
-# Packaging
+# Packaging Fastdistord 0.01
 
-Current version: 0.1.0 experimental. There are no published releases, package-manager recipes, notarized builds or automated release uploads. Successful private CI runs retain macOS arm64 ZIP and Linux x86_64 tarball build artifacts for14days. Upload steps must finish before a run has downloads.
+The public-facing version is **0.01**, tag **v0.01**; Cargo and native package metadata use SemVer **0.0.1**. Releases stay in the private repository. Publishing does not merge PR #1 or change repository visibility.
 
-## Reproducible source build
+## Packages
 
-Commit `Cargo.lock` and the pinned `rust-toolchain.toml`; build with `cargo build --locked --release`. Fastframe, egui and winit use exact Git revisions. Songbird source and its license are vendored with a documented safety patch. Native compilation also requires CMake and platform libraries; a lockfile does not promise bit-for-bit output across different operating systems or compilers.
+- Mac Apple Silicon: `scripts/bundle-macos.sh`, then `scripts/package-macos.sh`. The DMG includes Fastdistord.app, an Applications link and the MIT license. The app is ad-hoc signed, not notarized or Developer ID signed.
+- Windows x64: NSIS 3.11 compiles `packaging/windows/installer.nsi`. It installs for the current user, creates Start menu shortcuts and includes an uninstaller. No administrator access or automatic app launch. Not Authenticode signed.
+- Linux amd64: `scripts/package-linux.sh` creates a `.deb` with desktop entry and license. Runtime dependencies are derived from the actual executable, with required dynamically loaded GUI libraries included. Built on Ubuntu 24.04; compatible Debian/Ubuntu distributions only.
 
-## Apple Silicon `.app`
+Build with Rust 1.99.0, CMake and the prerequisites in [Getting started](docs/GETTING_STARTED.md). All dependencies are locked. Native tools/compiler versions can still affect output; this is not a bit-for-bit reproducibility claim.
 
-On macOS with Xcode command-line tools and CMake:
+## Release verification
 
-```sh
-rustup target add aarch64-apple-darwin
-./scripts/bundle-macos.sh
-```
+The Check workflow runs format, strict Clippy, tests, Songbird policy checks and release builds on all three platforms. It verifies the mounted DMG, payload hashes, version startup, Linux/Windows installation and uninstall. These are package smoke checks, not GUI or live-call tests.
 
-Output: `dist/Fastdistord.app`. The script includes and validates `NSMicrophoneUsageDescription`, copies the arm64 release binary and applies/verifies a local ad-hoc signature. This is not Developer ID signing or notarization. No release is uploaded. Review the bundle on an actual Mac before use or sharing; Linux smoke tests cannot establish native permissions/audio behavior.
+Only a push of the exact `v0.01` tag starts the release job after all three checks pass. The job confirms the repository is private and the tag matches its checkout. It uploads the actual three installers, `SOURCE_COMMIT.txt` and `SHA256SUMS` to a draft release, downloads every asset, compares bytes and checksums, then publishes. Failures leave the release unpublished. No persistent signing or account credentials are required.
 
-## Validation before any future distribution
-
-- Run contributor checks against the exact source commit.
-- Build and open the native bundle; verify microphone consent and Keychain behavior.
-- Complete explicitly authorized two-way voice, sustained DAVE membership, hidden-call, PTT, recovery and leave/quit tests.
-- Record target-machine release memory/CPU/startup/underruns; compare against the stated goals rather than asserting them.
-- Review licenses, write version-specific release notes and produce checksums.
-- Obtain explicit approval before publishing, changing repository visibility, signing with persistent credentials or uploading a release.
-
-CI checks Linux and macOS source builds and macOS bundle structure. It retains private Actions build artifacts; it does not publish a GitHub Release or claim a live Discord call. There is no updater or download button pointing to nonexistent binaries.
-
-The Mac bundle includes camera and microphone usage descriptions. Local camera preview requires explicit access and Start actions. The native window picker is available on macOS 14 or later. Packaging checks do not verify physical capture or live Discord media. See [media status](docs/MEDIA.md).
+Before tagging, verify the exact branch commit and its checks. Never replace a published tag or silently broaden the release to newer branch changes. [Release notes](packaging/RELEASE_NOTES.md) keep unfinished video/screen sharing and unverified live behavior explicit.

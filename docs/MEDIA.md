@@ -1,8 +1,8 @@
-# Local media and Discord video status
+# Media implementation status
 
-The Mac app has a **Local preview** tab for a selected camera or window. It does not send video to Discord. Preview works without signing in. Camera permission is requested only through its explicit button; starting the camera is a separate action. Window selection uses Apple's ScreenCaptureKit picker on macOS 14 or later, with screen audio disabled. Stop, changing tabs, hiding/minimizing/occluding the window, logout and quit release capture and preview frames.
+Version 0.01 exposes voice and text only. Standalone camera/window previews and codec diagnostics have been removed from the production UI. The capture/codec/DAVE/RTP implementations and automated/headless checks remain available to develop real call media. No preview is presented as a successful Discord video or screen-share session.
 
-Capture retains one bounded BGRA frame in memory. It does not record media. Physical camera/window preview and permission behavior have not been verified on this Mac because the app-opening computer-use request was canceled. Open the local bundle manually to perform those checks with safe content. League interactions and overlay work are stopped.
+Capture adapters retain at most one bounded BGRA frame and do not record media. Physical capture remains untested. League interactions and overlay work are stopped.
 
 ## Implemented and verified offline
 
@@ -14,11 +14,11 @@ Capture retains one bounded BGRA frame in memory. It does not record media. Phys
 - A synthetic DAVE/RTP/AEAD round trip passed over two loopback UDP sockets. No Discord or external destination was used.
 - The composed native test passed: generated frame → H.264 → DAVE → RTP → transport AEAD → authentication → reassembly → DAVE decryption → native decoding → pixel-fidelity check. It captured no camera/screen content and used no Discord connection.
 
-Run deterministic tests with `cargo test --locked`. On an authorized Mac, the optional hardware-dependent synthetic check is `cargo test --locked --test video_dave native_h264_dave_rtp_decode_roundtrip -- --ignored --nocapture`. The packaged executable also accepts `--check-native-video` for a synthetic codec check without opening the GUI or capture devices.
+Run deterministic tests with `cargo test --locked`. On an authorized Mac, the optional hardware-dependent synthetic check is `cargo test --locked --test video_dave native_h264_dave_rtp_decode_roundtrip -- --ignored --nocapture`.
 
 ## Remaining Discord pipeline
 
-No Discord video stream/codec/SSRC negotiation, UDP video sending, live receive/playback or Go Live integration is implemented. RTP/AEAD helpers have no sockets, extensions, retransmission or jitter buffer. The native preview and offline encrypted pipeline are separate; captured frames are not fed into a sender.
+No Discord video stream/codec/SSRC negotiation, UDP video sending, live receive/playback or Go Live integration is implemented. RTP/AEAD helpers have no sockets, extensions, retransmission or jitter buffer. Capture and the offline encrypted pipeline are separate; captured frames are not fed into a sender.
 
 Keep the order **encoded frame → DAVE → RTP → transport encryption**. Songbird's current driver is for audio. Do not invent video endpoints or reuse voice SSRCs. Public voice documentation does not provide a complete personal-account Go Live implementation.
 

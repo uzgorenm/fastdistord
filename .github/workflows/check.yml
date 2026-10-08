@@ -5,8 +5,9 @@ permissions:
 jobs:
   check:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -15,28 +16,108 @@ jobs:
           toolchain: 1.99.0
           components: rustfmt, clippy
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev cmake dpkg-dev
+      - if: runner.os == 'Windows'
+        run: choco install nsis --version=3.11 -y --no-progress
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: rustc --edition 2021 --test vendor/songbird/src/driver/dave_policy.rs -o /tmp/fastdistord-dave-tests && /tmp/fastdistord-dave-tests
-      - run: cargo build --locked --release
-      - if: runner.os == 'macOS'
-        run: scripts/bundle-macos.sh
-      - name: Package private macOS build
+      - name: Songbird policy checks
+        shell: bash
+        run: |
+          rustc --edition 2021 --test vendor/songbird/src/driver/dave_policy.rs -o "$RUNNER_TEMP/fastdistord-dave-tests"
+          "$RUNNER_TEMP/fastdistord-dave-tests"
+      - if: runner.os != 'Windows'
+        run: cargo build --locked --release
+      - name: Windows release with static C runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = '-C target-feature=+crt-static'
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed' }
+          New-Item -ItemType Directory -Force target/release | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/fastdistord.exe target/release/fastdistord.exe
+          $vs = & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName | Select-Object -Last 1
+          $deps = & $dumpbin.FullName /dependents target/release/fastdistord.exe
+          $deps | Write-Output
+          if ($LASTEXITCODE -ne 0 -or ($deps -match '(MSVCP|VCRUNTIME)[0-9_]*\.dll')) { throw 'Unbundled VC runtime dependency' }
+      - name: Mac bundle and DMG
         if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent dist/Fastdistord.app dist/fastdistord-macos-arm64.zip
-      - name: Package private Linux build
+        run: |
+          scripts/bundle-macos.sh
+          scripts/package-macos.sh
+          MOUNT=$(mktemp -d)
+          trap 'hdiutil detach "$MOUNT" || true' EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" dist/Fastdistord-0.01-macos-arm64.dmg
+          codesign --verify --deep --strict "$MOUNT/Fastdistord.app"
+          test "$("$MOUNT/Fastdistord.app/Contents/MacOS/fastdistord" --version)" = 'fastdistord 0.01'
+          test "$(readlink "$MOUNT/Applications")" = /Applications
+          cmp LICENSE "$MOUNT/LICENSE.txt"
+          cmp target/release/fastdistord "$MOUNT/Fastdistord.app/Contents/MacOS/fastdistord"
+      - name: Linux package and install/uninstall smoke
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist
-          tar -czf dist/fastdistord-linux-x86_64.tar.gz -C target/release fastdistord -C "$GITHUB_WORKSPACE" README.md LICENSE
-      - name: Save private build downloads
+          scripts/package-linux.sh
+          sudo apt-get install -y ./dist/fastdistord-0.01-linux-amd64.deb
+          test "$(fastdistord --version)" = 'fastdistord 0.01'
+          cmp target/release/fastdistord /usr/bin/fastdistord
+          test -z "$(dpkg --verify fastdistord)"
+          sudo apt-get remove -y fastdistord
+          test ! -e /usr/bin/fastdistord
+      - name: Windows installer and install/uninstall smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & 'C:\Program Files (x86)\NSIS\makensis.exe' packaging/windows/installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS build failed' }
+          ./scripts/smoke-windows.ps1
+      - name: Save verified packages
         uses: actions/upload-artifact@v4
         with:
-          name: fastdistord-${{ runner.os }}-${{ github.sha }}
+          name: packages-${{ runner.os }}-${{ github.sha }}
           path: |
-            dist/*.zip
-            dist/*.tar.gz
+            dist/*.dmg
+            dist/*-setup.exe
+            dist/*.deb
           if-no-files-found: error
           retention-days: 14
+  release:
+    if: github.repository == 'uzgorenm/fastdistord' && github.event_name == 'push' && github.ref == 'refs/tags/v0.01'
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*-${{ github.sha }}
+          path: release-assets
+          merge-multiple: true
+      - name: Publish private release and verify downloaded bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = true
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse v0.01)" = "$GITHUB_SHA"
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 3
+          test -s release-assets/Fastdistord-0.01-macos-arm64.dmg
+          test -s release-assets/Fastdistord-0.01-windows-x64-setup.exe
+          test -s release-assets/fastdistord-0.01-linux-amd64.deb
+          printf '%s\n' "$GITHUB_SHA" > release-assets/SOURCE_COMMIT.txt
+          (cd release-assets; sha256sum *.dmg *.exe *.deb SOURCE_COMMIT.txt > SHA256SUMS)
+          gh release create v0.01 --verify-tag --title 'Fastdistord 0.01' --notes-file packaging/RELEASE_NOTES.md --draft release-assets/*
+          mkdir release-download
+          gh release download v0.01 --dir release-download
+          (cd release-download; sha256sum -c SHA256SUMS)
+          cmp release-assets/SHA256SUMS release-download/SHA256SUMS
+          for asset in release-assets/*; do cmp "$asset" "release-download/$(basename "$asset")"; done
+          gh release edit v0.01 --draft=false
+          test "$(gh release view v0.01 --json isDraft --jq .isDraft)" = false
+          gh release view v0.01 --json url,assets,targetCommitish

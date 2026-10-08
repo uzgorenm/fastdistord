@@ -22,13 +22,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Fastdistord</string>
 <key>CFBundleIdentifier</key><string>me.uzgoren.fastdistord</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleShortVersionString</key><string>0.0.1</string>
 <key>CFBundleExecutable</key><string>fastdistord</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Fastdistord uses your microphone only after you join a voice channel. Leave or quit to release it.</string>
-<key>NSCameraUsageDescription</key><string>Fastdistord uses the selected camera only when you start a local preview. Preview content stays on this Mac. Stop preview or quit to release it.</string>
 </dict></plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist"
