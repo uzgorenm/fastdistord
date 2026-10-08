@@ -1,34 +1,32 @@
-# Video and screen sharing
+# Local media and Discord video status
 
-Camera video and screen sharing are unfinished. The desktop app does not expose a Start camera or Share screen action. No camera/screen permission is requested, and no video is transmitted.
+The Mac app has a **Local preview** tab for a selected camera or window. It does not send video to Discord. Preview works without signing in. Camera permission is requested only through its explicit button; starting the camera is a separate action. Window selection uses Apple's ScreenCaptureKit picker on macOS 14 or later, with screen audio disabled. Stop, changing tabs, hiding the window, logout and quit release capture and preview frames.
 
-`src/video.rs` is the first offline component of a separate media pipeline. It accepts bounded encoded H.264 Annex B or VP8 frames, delegates codec-aware video encryption to pinned Davey 0.1.4, rejects unready sessions and plaintext output, and attaches an encryption epoch to each encrypted frame. A later packet sender must check current authority under the session owner's lock; changing epochs invalidates queued frames and fragments. This module is not connected to Songbird's negotiated session yet.
+Capture retains one bounded BGRA frame in memory. It does not record media. Physical camera/window preview and permission behavior have not been verified on this Mac because the app-opening computer-use request was canceled. Open the local bundle manually to perform those checks with safe content. League interactions and overlay work are stopped.
 
-Tests cover size/format rejection, refusal by a real unnegotiated Davey session and revocation of prepared frames. They do not prove a successful video handshake, encrypted-video round trip, native capture, playback or Discord interoperability.
+## Implemented and verified offline
 
-## Remaining pipeline
+- AVFoundation camera and ScreenCaptureKit window capture adapters compile on Apple Silicon; actual capture remains untested.
+- VideoToolbox H.264 encoding/decoding, bounded AVCC/Annex B conversion and synthetic checkerboard validation passed a headless native test. Sessions currently encode standalone keyframes; sustained real-time performance is not established.
+- Codec-aware Davey encryption passed real two-participant MLS tests for H.264 and VP8, in both directions, with tamper/replay rejection and participant removal.
+- Bounded RFC 6184 single-NAL/FU-A RTP packetization and ordered reassembly preserve the encrypted frame and reject stale epochs and discontinuities. These are offline helpers with caller-supplied metadata.
+- The composed native test passed: generated frame → H.264 → DAVE → RTP → reassembly → DAVE decryption → native decoding → pixel-fidelity check. It captured no camera/screen content and used no Discord connection.
 
-| Stage | Status |
-|---|---|
-| AVFoundation camera capture | Candidate; not implemented or tested |
-| ScreenCaptureKit source picker/capture | Candidate; not implemented or tested |
-| VideoToolbox hardware encoding and AVCC-to-Annex-B conversion | Candidate; not implemented or tested |
-| Encoded frame to codec-aware DAVE | Offline component implemented; successful negotiated encryption untested |
-| Codec, stream and SSRC negotiation | Not implemented |
-| Encrypted frame to RTP, transport AEAD and UDP | Not implemented; never send raw DAVE bytes directly |
-| Receive, authenticate, reassemble, decrypt, decode and display | Not implemented |
-| Camera/share stop, session revocation and permission denial | Must close capture and queued-send authority before cleanup |
+Run deterministic tests with `cargo test --locked`. On an authorized Mac, the optional hardware-dependent synthetic check is `cargo test --locked --test video_dave native_h264_dave_rtp_decode_roundtrip -- --ignored --nocapture`. The packaged executable also accepts `--check-native-video` for a synthetic codec check without opening the GUI or capture devices.
 
-Keep the order **encoded frame → DAVE → RTP packetization → transport encryption**. The current Songbird driver is an audio implementation, not a video/Go Live transport. Do not invent stream endpoints or reuse voice SSRCs as video SSRCs. A negotiated video session and its membership transitions must be verified before introducing live transmission. The public voice guide describes voice negotiation and DAVE but does not supply a complete personal-account Go Live implementation.
+## Remaining Discord pipeline
 
-Prove the existing two-way voice call first. Then exercise synthetic native video encoding offline, followed by local preview of a user-selected camera or test window. Live camera/screen tests require a specific channel, participant and approved content. Session-only credential entry stays local; persistent storage requires separate approval. League overlay work is stopped.
+No video stream/codec/SSRC negotiation, transport AEAD, UDP video sending, live receive/playback or Go Live integration is implemented. RTP helpers have no sockets, extensions, retransmission or jitter buffer. The native preview and offline encrypted pipeline are separate; captured frames are not fed into a sender.
+
+Keep the order **encoded frame → DAVE → RTP → transport encryption**. Songbird's current driver is for audio. Do not invent video endpoints or reuse voice SSRCs. Public voice documentation does not provide a complete personal-account Go Live implementation.
+
+Real two-way voice remains the first live acceptance gate: microphone/playback, DAVE membership changes, leave/rejoin and recovery. Live audio, text, camera or screen tests require local credential handoff, a target channel, second participant and approved content. Persistent credential storage requires separate approval.
 
 ## References
 
-- [Discord voice negotiation and DAVE](https://docs.discord.com/developers/topics/voice-connections)
-- [DAVE protocol whitepaper](https://daveprotocol.com/)
-- [Official libdave implementation](https://github.com/discord/libdave)
-- [Davey 0.1.4](https://docs.rs/davey/0.1.4/davey/) and its pinned local source
-- Apple API candidates: [AVFoundation](https://developer.apple.com/documentation/avfoundation), [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit), [VideoToolbox](https://developer.apple.com/documentation/videotoolbox)
+- [Discord voice negotiation](https://docs.discord.com/developers/topics/voice-connections), [DAVE protocol](https://daveprotocol.com/) and [official libdave](https://github.com/discord/libdave)
+- [Davey 0.1.4](https://docs.rs/davey/0.1.4/davey/) and pinned local source
+- [RFC 6184 H.264 RTP](https://www.rfc-editor.org/rfc/rfc6184)
+- Apple [AVFoundation](https://developer.apple.com/documentation/avfoundation), [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) and [VideoToolbox](https://developer.apple.com/documentation/videotoolbox)
 
-Davey, OpenMLS and Songbird retain their upstream licenses. This project does not implement cryptography or a video codec.
+Davey, OpenMLS, Songbird and objc2 bindings retain their upstream licenses. This project does not implement cryptography or a video codec.

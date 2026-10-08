@@ -28,6 +28,12 @@ Type plain text and press **Send message**. Enter adds a line rather than sendin
 
 Sending disables server/channel changes until the response arrives. A failed send keeps the draft. If its outcome is uncertain, refresh history before retrying to avoid duplicates. Switching text channels or servers clears the unsent draft. Logout cancels pending text work and clears displayed history.
 
+## Local media preview (Mac)
+
+Open **Local preview** without signing in. For camera preview, choose **Find cameras**, grant access with **Allow camera access**, select a camera and press **Start camera preview**. For a window, choose **Choose window to preview** and select safe content in the native picker (macOS 14 or later). Screen audio is disabled. No preview content is sent to Discord or saved.
+
+**Stop preview**, leaving the tab, hiding the window, logout and quit release capture. **Check codec with synthetic frame** uses generated pixels only. Physical preview and permission handling still require manual verification; see [media status](MEDIA.md).
+
 ## Devices and background use
 
 Choose stable device IDs through their friendly names in Settings. Selections apply on your next Join: leave and rejoin to change devices safely. Removed devices are labeled unavailable. Idle/disconnected mode never captures audio. A device failure closes this audio engine immediately. Recovery retries only the same pinned microphone and speaker IDs with bounded backoff. It never substitutes another device; exhausted retries leave an actionable failure. OS-managed virtual devices can change their underlying physical route outside the app, which still needs hardware testing.

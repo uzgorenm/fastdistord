@@ -27,3 +27,5 @@ Output: `dist/Fastdistord.app`. The script includes and validates `NSMicrophoneU
 - Obtain explicit approval before publishing, changing repository visibility, signing with persistent credentials or uploading a release.
 
 CI checks Linux and macOS source builds and macOS bundle structure. It retains private Actions build artifacts; it does not publish a GitHub Release or claim a live Discord call. There is no updater or download button pointing to nonexistent binaries.
+
+The Mac bundle includes camera and microphone usage descriptions. Local camera preview requires explicit access and Start actions. The native window picker is available on macOS 14 or later. Packaging checks do not verify physical capture or live Discord media. See [media status](docs/MEDIA.md).

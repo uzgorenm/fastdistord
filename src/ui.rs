@@ -15,6 +15,8 @@ use crate::audio::TxGate;
 use crate::model::{Command, DeviceChoice, Phase, UiState};
 
 mod hotkey;
+#[cfg(target_os = "macos")]
+mod media;
 mod theme;
 
 const METER_INTERVAL: Duration = Duration::from_millis(100);
@@ -101,6 +103,10 @@ struct VoiceApp {
     message_draft: String,
     draft_channel: Option<u64>,
     last_sent_revision: u64,
+    #[cfg(target_os = "macos")]
+    media_open: bool,
+    #[cfg(target_os = "macos")]
+    media: media::MediaView,
 }
 
 impl VoiceApp {
@@ -156,6 +162,10 @@ impl VoiceApp {
             message_draft: String::new(),
             draft_channel: None,
             last_sent_revision: 0,
+            #[cfg(target_os = "macos")]
+            media_open: false,
+            #[cfg(target_os = "macos")]
+            media: media::MediaView::new(),
         }
     }
 
@@ -170,11 +180,17 @@ impl VoiceApp {
         // Privacy-closing controls act immediately, even if the backend is
         // busy. Opening transmission is left to the authoritative backend.
         match &command {
+            #[cfg(target_os = "macos")]
+            Command::Logout | Command::Quit => {
+                self.media.stop();
+                self.gate.fail_closed();
+            }
             Command::SetMuted(true) => self.gate.set_muted(true),
             Command::SetDeafened(true) => self.gate.set_deafened(true),
             Command::Leave | Command::Join { .. } | Command::Reconnect => {
                 self.gate.set_suppressed(true)
             }
+            #[cfg(not(target_os = "macos"))]
             Command::Logout | Command::Quit => self.gate.fail_closed(),
             _ => {}
         }
@@ -263,6 +279,8 @@ impl VoiceApp {
 
     fn send_shutdown(&mut self) {
         if !self.shutdown_sent {
+            #[cfg(target_os = "macos")]
+            self.media.stop();
             self.shutdown_sent = true;
             self.gate.fail_closed();
             self.ptt.stop();
@@ -280,8 +298,29 @@ impl VoiceApp {
                 RichText::new("fastdistord").font(fastframe_fonts::Weight::SemiBold.font_id(20.0)),
             );
             ui.add_space(10.0);
-            ui.selectable_value(&mut self.text_open, false, "Voice");
-            ui.selectable_value(&mut self.text_open, true, "Text");
+            let voice_clicked = ui
+                .selectable_value(&mut self.text_open, false, "Voice")
+                .clicked();
+            let text_clicked = ui
+                .selectable_value(&mut self.text_open, true, "Text")
+                .clicked();
+            #[cfg(target_os = "macos")]
+            if voice_clicked || text_clicked {
+                self.media_open = false;
+                self.media.stop();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (voice_clicked, text_clicked);
+            #[cfg(target_os = "macos")]
+            if ui
+                .selectable_label(self.media_open, "Local preview")
+                .clicked()
+            {
+                self.media_open = !self.media_open;
+                if !self.media_open {
+                    self.media.stop();
+                }
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
@@ -1044,6 +1083,11 @@ impl VoiceApp {
                     .inner_margin(egui::Margin::symmetric(28, 18)),
             )
             .show(ui, |ui| {
+                #[cfg(target_os = "macos")]
+                if self.media_open {
+                    self.media.show(ui);
+                    return;
+                }
                 if let Some(error) = &self.local_error {
                     ui.colored_label(theme::DANGER, error);
                     ui.add_space(9.0);
@@ -1118,6 +1162,8 @@ impl Resident for VoiceApp {
     }
 
     fn window_gone(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.media.stop();
         self.hidden = true;
         self.send(Command::SetUiVisible(false));
         self.hide_intent = false;

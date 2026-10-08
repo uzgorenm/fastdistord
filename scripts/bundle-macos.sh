@@ -28,6 +28,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Fastdistord uses your microphone only after you join a voice channel. Leave or quit to release it.</string>
+<key>NSCameraUsageDescription</key><string>Fastdistord uses the selected camera only when you start a local preview. Preview content stays on this Mac. Stop preview or quit to release it.</string>
 </dict></plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist"

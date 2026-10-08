@@ -22,8 +22,9 @@ There is **no public release, Homebrew cask, Developer-ID-signed download, or no
 - Bounded session/device recovery with explicit mute preserved and no fallback microphone
 - Optional macOS Keychain storage; no recording or telemetry
 - Text-channel selection, latest 50 messages, manual refresh and explicit plain-text sending
+- Mac local camera/window preview with explicit source selection and Stop
 
-Voice and text are implemented but still need a real Discord session to verify. Camera video and screen sharing are unfinished; [media status](docs/MEDIA.md) describes the offline encryption component and missing stages.
+Voice and text still need a real Discord session to verify. Mac local preview is implemented but needs physical testing. Native synthetic H.264 and offline DAVE/RTP round trips passed; Discord video/screen sending is unfinished. See [media status](docs/MEDIA.md).
 
 Use headphones. Echo cancellation, noise suppression and automatic gain control are not implemented.
 

@@ -11,7 +11,7 @@ use davey::{Codec, DaveSession, MediaType};
 
 pub const MAX_ENCODED_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
     /// Annex B access unit, not VideoToolbox's length-prefixed AVCC output.
     H264,
@@ -78,6 +78,7 @@ impl EncodedVideoFrame {
         Ok(EncryptedVideoFrame {
             bytes,
             epoch: authority.epoch,
+            codec: self.codec,
         })
     }
 }
@@ -87,9 +88,13 @@ impl EncodedVideoFrame {
 pub struct EncryptedVideoFrame {
     bytes: Vec<u8>,
     epoch: u64,
+    codec: VideoCodec,
 }
 
 impl EncryptedVideoFrame {
+    pub fn codec(&self) -> VideoCodec {
+        self.codec
+    }
     /// Recheck during final packet commit under the session owner's lock.
     /// An epoch change invalidates the entire frame, including queued fragments.
     pub fn payload_for(&self, authority: VideoAuthority) -> Result<&[u8], VideoError> {
@@ -153,6 +158,7 @@ mod tests {
         let frame = EncryptedVideoFrame {
             bytes: vec![1, 2, 3],
             epoch: 7,
+            codec: VideoCodec::Vp8,
         };
         assert!(
             frame

@@ -17,7 +17,7 @@ A small native Rust/fastframe voice-first Discord client experiment. macOS Apple
 
 - Plain-text guild messaging: bounded history, manual refresh and explicit Send; mentions and embeds suppressed
 
-Camera video and screen sharing are not implemented. League overlay work is stopped.
+Mac local camera/window preview is implemented but awaits physical testing. Discord video and screen sending are unfinished; see [media status](MEDIA.md). League overlay work is stopped.
 
 ## Build
 
