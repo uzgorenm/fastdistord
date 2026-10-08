@@ -86,15 +86,29 @@ jobs:
             dist/*.deb
           if-no-files-found: error
           retention-days: 14
-  release:
+  release-status:
     if: github.repository == 'uzgorenm/fastdistord' && github.event_name == 'push' && github.ref == 'refs/tags/v0.01'
-    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: write
+    steps:
+      - name: Record exact release run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=pending -f context=release/v0.01 -f description='Installer checks and private release verification running' -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --silent
+  release:
+    if: always() && github.repository == 'uzgorenm/fastdistord' && github.event_name == 'push' && github.ref == 'refs/tags/v0.01'
+    needs: [check, release-status]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      statuses: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - if: needs.check.result == 'success'
+        uses: actions/checkout@v4
+      - if: needs.check.result == 'success'
+        uses: actions/download-artifact@v4
         with:
           pattern: packages-*-${{ github.sha }}
           path: release-assets
@@ -102,9 +116,15 @@ jobs:
       - name: Publish private release and verify downloaded bytes
         env:
           GH_TOKEN: ${{ github.token }}
+          CHECK_RESULT: ${{ needs.check.result }}
         shell: bash
         run: |
           set -euo pipefail
+          release_status() {
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f "state=$1" -f context=release/v0.01 -f "description=$2" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --silent
+          }
+          trap 'release_status failure "Release verification failed; inspect this run"' ERR
+          test "$CHECK_RESULT" = success
           test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = true
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse v0.01)" = "$GITHUB_SHA"
@@ -123,3 +143,4 @@ jobs:
           gh release edit v0.01 --draft=false
           test "$(gh release view v0.01 --json isDraft --jq .isDraft)" = false
           gh release view v0.01 --json url,assets,targetCommitish
+          release_status success "Private v0.01 published; all downloaded assets byte-verified"
