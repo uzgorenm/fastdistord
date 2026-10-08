@@ -1,3 +1,11 @@
+# Remembered login startup, 2026-10-08
+
+Source confirmed successful Keychain saves were possible, but startup never loaded a saved login; users had to press Connect from Keychain. Remember defaulted false every launch. Quit already preserved storage. Keychain save failure incorrectly aborted an otherwise authenticated connection. No credential values or local Keychain entries were inspected.
+
+Explicit Remember me now saves after authentication and then writes a nonsecret opt-in preference under Application Support. Startup checks that preference and makes one in-app saved-login attempt without joining voice. Session-only login disables startup; Quit/window-close cleanup never removes credentials. Save/preference failure remains visible in Settings while the authenticated session stays usable. HTTP 401 and Gateway 4004 authentication rejection are typed, stop reconnecting and attempt stale remembered credential removal; transient failures and channel permissions do not delete credentials. Explicit Logout disables the preference and attempts Keychain removal independently, clears account state and revokes audio. Service/account and bundle identifier remain stable across versioned app filenames. Ad-hoc signing may still cause macOS Keychain access prompts; no grant, ACL change, security bypass or plaintext credential fallback was added.
+
+Format, strict all-target Clippy and 112 offline tests passed (four hardware/socket tests ignored). New fake-store/policy checks cover persistence across simulated lifecycles, save denial/cancellation represented as storage failure, opt-in failure, deletion denial, logout and fixed authentication diagnostics versus network/channel errors. Native Keychain prompts, QR save and actual process relaunch remain user tests; the agents did not load/save a real credential or connect the account. Live MLS failure remains unresolved. Actions remain removed; PR 2 remains draft, no merge/public release.
+
 # Multi-peer live stall, 2026-10-08
 
 The user reports that other participants cannot hear them. Their screenshot shows protocol 1, two voice peers (including self), account roster 1, and no accepted MLS commit/welcome. This is a live multi-peer handshake failure, not proof of microphone denial. The disagreement cannot authorize indefinite solo waiting. Two-way voice remains unverified.

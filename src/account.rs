@@ -17,6 +17,15 @@ pub struct PersonalAccount {
     token: Zeroizing<String>,
     http: reqwest::Client,
 }
+#[derive(Debug)]
+pub struct AuthenticationRejected;
+impl std::fmt::Display for AuthenticationRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Discord rejected this login. Sign in again.")
+    }
+}
+impl std::error::Error for AuthenticationRejected {}
+
 impl PersonalAccount {
     pub async fn connect(
         token: String,
@@ -80,7 +89,8 @@ impl PersonalAccount {
             anyhow::anyhow!("Discord request failed; its outcome may be uncertain.")
         })?;
         match response.status().as_u16() {
-            401 | 403 => {
+            401 => return Err(AuthenticationRejected.into()),
+            403 => {
                 bail!("Discord denied account or channel access. No retry or bypass was attempted.")
             }
             429 => bail!("Discord rate limited the request. Wait before trying again."),
@@ -274,6 +284,7 @@ pub enum GatewayEvent {
     Closed {
         message: String,
         retryable: bool,
+        auth_rejected: bool,
         resume: Option<GatewayResume>,
     },
 }
@@ -294,8 +305,9 @@ impl Gateway {
         let task = tokio::spawn(async move {
             let mut session = resume;
             if let Err(error) = gateway_loop(token, rx, event_tx.clone(), &mut session).await {
-                let retryable =
-                    error.downcast_ref::<TerminalGateway>().is_none() && session.is_some();
+                let retryable = error.downcast_ref::<TerminalGateway>().is_none()
+                    && error.downcast_ref::<AuthenticationRejected>().is_none()
+                    && session.is_some();
                 let _ = event_tx
                     .send(GatewayEvent::Closed {
                         message: if retryable {
@@ -305,6 +317,7 @@ impl Gateway {
                         }
                         .into(),
                         retryable,
+                        auth_rejected: error.downcast_ref::<AuthenticationRejected>().is_some(),
                         resume: if retryable { session } else { None },
                     })
                     .await;
@@ -534,6 +547,9 @@ async fn gateway_loop(
                     }
                     Message::Ping(v) => write.send(Message::Pong(v)).await?,
                     Message::Close(frame) => {
+                        if frame.as_ref().is_some_and(|f| u16::from(f.code) == 4004) {
+                            return Err(AuthenticationRejected.into());
+                        }
                         if !gateway_close_is_retryable(frame.as_ref().map(|f| u16::from(f.code))) {
                             return Err(TerminalGateway.into());
                         }

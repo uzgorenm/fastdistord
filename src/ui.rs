@@ -165,7 +165,7 @@ impl VoiceApp {
             tray,
             token: Zeroizing::new(String::new()),
             risk_accepted: false,
-            remember: false,
+            remember: crate::credential::remembered(),
             qr_login: None,
             qr_code: None,
             qr_status: String::new(),
@@ -684,17 +684,20 @@ impl VoiceApp {
         ui.add_space(12.0);
         #[cfg(target_os = "macos")]
         ui.add_enabled_ui(self.qr_login.is_none(), |ui| {
-            ui.checkbox(&mut self.remember, "Remember in macOS Keychain");
+            ui.checkbox(&mut self.remember, "Remember me — save in macOS Keychain");
         });
         ui.label(
             RichText::new(if self.remember {
-                "Saved only after a successful connection."
+                "Save after successful login and reconnect on future launches. macOS may ask for Keychain access."
             } else {
-                "Session only. Nothing is saved to disk."
+                "Session only. Automatic login is disabled."
             })
             .size(12.0)
             .color(theme::SECONDARY),
         );
+        if !state.login_storage_status.is_empty() {
+            ui.label(&state.login_storage_status);
+        }
         let connecting = matches!(state.phase, Phase::Connecting | Phase::Reconnecting);
         let events: Vec<_> = self
             .qr_login
@@ -1328,6 +1331,7 @@ impl VoiceApp {
                 if ui.add_enabled(call_sounds, egui::Slider::new(&mut sound_volume, 0.0..=1.0).text("Call sound volume")).changed() { self.send(Command::SetSoundVolume(sound_volume)); }
                 if let Some(error) = &self.sound_error { ui.label(RichText::new(error).size(12.0).color(theme::DANGER)); }
                 ui.label(state.microphone_permission.label());
+                if !state.login_storage_status.is_empty() { ui.label(&state.login_storage_status); }
                 if matches!(state.microphone_permission, crate::microphone::Permission::Denied | crate::microphone::Permission::Restricted) {
                     ui.label("Open System Settings → Privacy & Security → Microphone, then Join again.");
                 }

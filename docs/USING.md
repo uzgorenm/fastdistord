@@ -18,7 +18,7 @@
 | Reconnect | Restarts failed signaling with the in-memory credential; explicitly rejoin voice afterward |
 | Disconnect | Ends voice and releases both audio devices |
 | Log out | Clears the account and removes a saved macOS Keychain credential |
-| Quit | Stops audio and exits, including a hidden active call |
+| Quit | Stops audio and exits; preserves a remembered login |
 
 PTT starts disabled. Modifier-only hotkeys are not used. The global shortcut is registered only while PTT is enabled. If the OS backend cannot register it, the app reports that and the visible hold control remains available. Native Wayland has no global shortcut support in this backend. Focus/visibility changes release pending talk state; uncertain input fails muted.
 
@@ -73,3 +73,5 @@ For bug reports, include platform, app commit, expected/actual behavior, steps a
 Transient recovery uses five attempts with1/2/4/8/16-second delays. A retry budget resets only after60seconds of stable success, preventing endless rapid failure loops. Each session-resume attempt has a deadline; authentication failures, invalid sessions, rate limits, unknown/ambiguous disconnects and DAVE failures require explicit action. Voice restoration requires the previously authorized same guild/channel/session and the same pinned devices. Fresh server endpoint updates replace cached voice credentials; cancellation clears them.
 
 Leave, Log out, switching accounts/channels, server move/kick, permission changes and a removed voice endpoint invalidate pending retries immediately. A closed media/session gate prevents an older asynchronous result from restoring audio after a newer action. Selecting a new device still requires an explicit next Join; automatic recovery does not treat a new selection as permission to swap microphones mid-call.
+
+Choose **Remember me — save in macOS Keychain** before QR login to reconnect on future launches. A successful save enables one startup connection attempt; it does not join voice. Settings shows whether saving succeeded. Denied/canceled Keychain access leaves the current successful login usable and shows a save failure. A network failure preserves the saved credential; a rejected login disables startup and attempts to forget it. Explicit Log out disables startup and attempts Keychain deletion even if either operation fails. Only the nonsecret opt-in preference is stored in Application Support. The bundle identifier (`me.uzgoren.fastdistord`) and Keychain service/account (`fastdistord.personal-account` / `default`) are stable across versioned app names. These local builds are ad-hoc signed; macOS may ask for Keychain access again after an update. Approve or cancel that prompt yourself; no permission bypass is included.

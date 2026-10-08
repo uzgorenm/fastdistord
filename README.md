@@ -4,7 +4,7 @@
 
 [Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Contribute](CONTRIBUTING.md)
 
-The sign-in screen offers fresh QR login with mobile approval or explicit macOS Keychain reconnect. Use **Friends | Servers** in one sidebar. Friends open conversations; server channels appear beneath the selected server. Click the selected server to collapse or expand its channels. Friends follow recent DM activity; profile controls stay visible while you browse.
+The sign-in screen offers fresh QR login with mobile approval or macOS Keychain reconnect. Choose **Remember me** to reconnect on future launches. Use **Friends | Servers** in one sidebar. Friends open conversations; server channels appear beneath the selected server. Click the selected server to collapse or expand its channels. Friends follow recent DM activity; profile controls stay visible while you browse.
 
 ## Download and install
 
@@ -28,7 +28,7 @@ The app starts muted and does not record audio or collect telemetry.
 
 1. Launch Fastdistord. You can explore the offline interface without credentials.
 2. Read the account-access sentence, then choose **Connect with QR code**.
-3. Scan the fresh code with Discord on your phone and approve there. Only approve a login you started here. Keychain storage is optional; otherwise the session stays in memory.
+3. Scan the fresh code with Discord on your phone and approve there. Only approve a login you started here. Select **Remember me** to save in macOS Keychain and reconnect on launch. Otherwise the session stays in memory.
 4. Choose **Servers**, then a server and **Join · channel**. Allow microphone access if prompted, confirm encrypted voice readiness and unmute when ready.
 5. Choose a friend to chat; **Call** starts an individual voice call. Enable push-to-talk in Settings, then hold **Ctrl+Shift+Space** or **Hold to talk** while unmuted.
 6. **Disconnect** releases audio devices. Closing the window may keep an active call running; **Quit** ends it.

@@ -27,6 +27,13 @@ fn main() -> anyhow::Result<()> {
     let gate = std::sync::Arc::new(audio::TxGate::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = runtime::spawn(state.clone(), rx, gate.clone());
+    #[cfg(target_os = "macos")]
+    if credential::remembered() {
+        // Explicit prior Remember me consent. One attempt per launch, no voice join.
+        let _ = tx.send(model::Command::ConnectSaved {
+            risk_accepted: true,
+        });
+    }
     let result = ui::run(state, tx.clone(), gate);
     let _ = tx.send(model::Command::Quit);
     drop(tx);

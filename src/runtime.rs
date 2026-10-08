@@ -55,6 +55,7 @@ enum ResultEvent {
         u64,
         Result<(PersonalAccount, Account, Vec<Guild>)>,
         Option<zeroize::Zeroizing<String>>,
+        bool,
     ),
     Social(
         u64,
@@ -202,6 +203,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     let mut ui_visible = true;
     let mut repaint: Repaint = None;
     let mut client: Option<Arc<PersonalAccount>> = None;
+    let mut remembered_session = false;
     let mut gateway: Option<Gateway> = None;
     let mut transport: Option<Transport> = None;
     let (mut generation, mut join_generation) = (0_u64, 0_u64);
@@ -307,6 +309,17 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         risk_accepted,
                         remember,
                     } => {
+                        remembered_session = false;
+                        let outcome = crate::credential::disable_startup();
+                        update(&state, &repaint, |s| {
+                            s.login_storage_status = if outcome.is_err() {
+                                "Could not disable previous automatic login; use Log out & forget credential.".into()
+                            } else if remember {
+                                "Remember me will save only after successful login.".into()
+                            } else {
+                                "Session only; automatic login disabled.".into()
+                            };
+                        });
                         reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                         generation = generation.wrapping_add(1);
                         join_generation = join_generation.wrapping_add(1);
@@ -352,7 +365,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             });
                             let result = PersonalAccount::connect(token, risk_accepted).await;
                             let saved = if remember { Some(saved) } else { None };
-                            let _ = tx.send(ResultEvent::Account(id, result, saved)).await;
+                            let _ = tx
+                                .send(ResultEvent::Account(id, result, saved, false))
+                                .await;
                         }));
                     }
                     #[cfg(target_os = "macos")]
@@ -383,7 +398,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 let tx = results_tx.clone();
                                 connect_task = Some(tokio::spawn(async move {
                                     let result = PersonalAccount::connect(token, true).await;
-                                    let _ = tx.send(ResultEvent::Account(id, result, None)).await;
+                                    let _ =
+                                        tx.send(ResultEvent::Account(id, result, None, true)).await;
                                 }));
                                 update(&state, &repaint, |s| {
                                     s.phase = Phase::Connecting;
@@ -418,7 +434,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     }
                     Command::Logout => {
                         reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
-                        let forgotten = crate::credential::forget();
+                        let forgotten = crate::credential::sign_out();
+                        remembered_session = false;
                         generation = generation.wrapping_add(1);
                         join_generation = join_generation.wrapping_add(1);
                         gate.begin_session();
@@ -1056,39 +1073,63 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                     });
                 }
-                Some(ResultEvent::Account(id, result, saved)) if id == generation => match result {
-                    Ok((c, a, guilds)) => {
-                        if let Some(secret) = saved
-                            && let Err(error) = crate::credential::store(&secret)
-                        {
+                Some(ResultEvent::Account(id, result, saved, from_saved)) if id == generation => {
+                    match result {
+                        Ok((c, a, guilds)) => {
+                            if let Some(secret) = saved {
+                                let outcome = crate::credential::remember(&secret);
+                                remembered_session = outcome.is_ok();
+                                update(&state, &repaint, |s| {
+                                    s.login_storage_status = if outcome.is_ok() {
+                                        "Remembered in macOS Keychain; reconnects on launch. Quit preserves login.".into()
+                                    } else {
+                                        "Login connected, but Remember me failed. Check Keychain access and sign in again with Remember me; this session remains usable.".into()
+                                    }
+                                });
+                            } else if from_saved {
+                                remembered_session = true;
+                                update(&state, &repaint, |s| {
+                                    s.login_storage_status = "Connected using macOS Keychain. Quit preserves login; Log out forgets it.".into()
+                                });
+                            }
+                            signal_ready = false;
+                            gateway = Some(c.gateway());
+                            client = Some(Arc::new(c));
+                            update(&state, &repaint, |s| {
+                                s.profiles.clear();
+                                s.profiles.insert(
+                                    a.id,
+                                    crate::profiles::Profile {
+                                        avatar: a.avatar.clone(),
+                                        ..Default::default()
+                                    },
+                                );
+                                s.account = Some(a);
+                                s.guilds = guilds;
+                                s.status = "Connecting Discord signaling…".into();
+                            });
+                        }
+                        Err(error) => {
+                            let rejected = saved_login_rejected(from_saved, &error);
+                            let removed = if rejected {
+                                crate::credential::sign_out().is_ok()
+                            } else {
+                                false
+                            };
                             update(&state, &repaint, |s| {
                                 s.phase = Phase::Failed;
                                 s.status = error.to_string();
+                                if rejected {
+                                    s.login_storage_status = if removed {
+                                        "Expired saved login removed. Sign in again.".into()
+                                    } else {
+                                        "Saved login rejected. Automatic login disabled if possible; remove fastdistord.personal-account in Keychain Access if prompted.".into()
+                                    };
+                                }
                             });
-                            continue;
                         }
-                        signal_ready = false;
-                        gateway = Some(c.gateway());
-                        client = Some(Arc::new(c));
-                        update(&state, &repaint, |s| {
-                            s.profiles.clear();
-                            s.profiles.insert(
-                                a.id,
-                                crate::profiles::Profile {
-                                    avatar: a.avatar.clone(),
-                                    ..Default::default()
-                                },
-                            );
-                            s.account = Some(a);
-                            s.guilds = guilds;
-                            s.status = "Connecting Discord signaling…".into();
-                        });
                     }
-                    Err(error) => update(&state, &repaint, |s| {
-                        s.phase = Phase::Failed;
-                        s.status = error.to_string();
-                    }),
-                },
+                }
                 Some(ResultEvent::Channels(id, guild, result))
                     if id == generation && snapshot(&state).selected_guild == Some(guild) =>
                 {
@@ -1228,8 +1269,38 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 Some(GatewayEvent::Closed {
                     message,
                     retryable,
+                    auth_rejected,
                     resume,
                 }) => {
+                    if auth_rejected {
+                        let removed = !remembered_session || crate::credential::sign_out().is_ok();
+                        remembered_session = false;
+                        client.take();
+                        roster.clear();
+                        complete_rosters.clear();
+                        reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
+                        update(&state, &repaint, |s| {
+                            s.account = None;
+                            s.selected_channel = None;
+                            s.selected_guild = None;
+                            s.selected_call_dm = None;
+                            s.selected_call_guild = None;
+                            s.profiles.clear();
+                            s.friends.clear();
+                            s.direct_channels.clear();
+                            s.guilds.clear();
+                            s.channels.clear();
+                            s.current_call = None;
+                            s.call_events.clear();
+                            s.login_storage_status = if removed {
+                                "Discord rejected this login. Sign in again; no automatic retry."
+                                    .into()
+                            } else {
+                                "Discord rejected this login. Keychain removal failed; remove fastdistord.personal-account in Keychain Access.".into()
+                            };
+                        });
+                    }
+
                     if let Some(task) = ring_task.take() {
                         task.abort();
                     }
@@ -1911,6 +1982,12 @@ fn retryable_connect_error(error: &anyhow::Error, device_episode: bool) -> bool 
     error.downcast_ref::<TransientVoiceFailure>().is_some()
         || (device_episode && error.downcast_ref::<AudioOpenFailure>().is_some())
 }
+fn saved_login_rejected(from_saved: bool, error: &anyhow::Error) -> bool {
+    from_saved
+        && error
+            .downcast_ref::<crate::account::AuthenticationRejected>()
+            .is_some()
+}
 fn voice_flags_authorized(recovery: &CallRecovery, pending: Option<&PendingVoice>) -> bool {
     matches!((&recovery.info, pending), (Some(info), Some(p)) if info.guild_id == (!p.private).then_some(p.guild) && info.channel_id == p.channel && p.session.as_deref() == Some(info.session_id.as_str()))
 }
@@ -2145,6 +2222,28 @@ fn permission_event_affects_call(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn only_saved_auth_rejection_revokes_persistence_without_secret_diagnostics() {
+        let rejected: anyhow::Error = crate::account::AuthenticationRejected.into();
+        assert!(saved_login_rejected(true, &rejected));
+        assert!(!saved_login_rejected(false, &rejected));
+        assert!(!saved_login_rejected(
+            true,
+            &anyhow::anyhow!("Network unavailable")
+        ));
+        assert!(!saved_login_rejected(
+            true,
+            &anyhow::anyhow!("Channel access denied")
+        ));
+        assert_eq!(
+            rejected.to_string(),
+            "Discord rejected this login. Sign in again."
+        );
+        assert_eq!(
+            format!("{:?}", crate::account::AuthenticationRejected),
+            "AuthenticationRejected"
+        );
+    }
     #[test]
     fn own_confirmed_mute_and_admin_deafen_close_capture_independently_of_intent() {
         let state = Arc::new(Mutex::new(UiState {
