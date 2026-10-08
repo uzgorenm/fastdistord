@@ -12,8 +12,8 @@ Build with Rust 1.99.0, CMake and the prerequisites in [Getting started](docs/GE
 
 ## Release verification
 
-The Check workflow runs format, strict Clippy, tests, Songbird policy checks and release builds on all three platforms. It verifies the mounted DMG, payload hashes, version startup, Linux/Windows installation and uninstall. These are package smoke checks, not GUI or live-call tests.
+Build and test locally on each target platform. Verify mounted DMG contents and signature, installed payload hashes, `--version`, and Windows/Linux installation and uninstall. These package checks do not establish GUI or live-call behavior.
 
-Only a push of the exact `v0.01` tag starts the release job after all three checks pass. The job confirms the repository is private and the tag matches its checkout. It uploads the actual three installers, `SOURCE_COMMIT.txt` and `SHA256SUMS` to a draft release, downloads every asset, compares bytes and checksums, then publishes. Failures leave the release unpublished. No persistent signing or account credentials are required.
+GitHub Actions workflows have been removed. Never use an Actions fallback or a paid build service without approval. Windows and Linux packages need native build hosts; this Mac can build the Apple Silicon app and DMG.
 
-Before tagging, verify the exact branch commit and its checks. Never replace a published tag or silently broaden the release to newer branch changes. [Release notes](packaging/RELEASE_NOTES.md) keep unfinished video/screen sharing and unverified live behavior explicit.
+Publish only actual verified installers. Record the exact source commit in `SOURCE_COMMIT.txt` and asset hashes in `SHA256SUMS`. Verify private repository visibility, upload to a draft release, download and compare every asset, then publish. Never replace a published tag. See [Release notes](packaging/RELEASE_NOTES.md).

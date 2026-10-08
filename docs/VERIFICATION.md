@@ -2,7 +2,7 @@
 
 Current production UI contains account entry, voice and text only. Standalone media previews, codec diagnostics and the audio diagnostics panel were removed; automated/headless media tests remain. Local format, strict Clippy, all 77 deterministic tests and the SemVer 0.0.1 Mac bundle/signature checks passed. The user-facing version is 0.01. Native GUI inspection was not retried after cancellation. Hardware and live Discord behavior remain unverified; the user will perform live testing.
 
-The three-platform packaging workflow builds a Mac DMG, per-user Windows NSIS EXE installer and Linux amd64 Debian package. It verifies package payloads and version startup, including Windows/Linux install and uninstall. The release job gates publication on all three builds and compares downloaded draft assets before publication. See [Packaging](../PACKAGING.md) and the release's exact source/checksum manifests for final release identity. Historical checks below describe earlier revisions and UI.
+GitHub Actions workflows were removed at the user’s request. Packaging now uses local scripts on native build hosts. Historical runs below remain historical evidence only; they do not verify newer changes or a published release.
 
 # Account flow and compact UI follow-up, 2026-10-08
 
