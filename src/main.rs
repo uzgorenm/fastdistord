@@ -5,6 +5,7 @@ mod audio;
 mod credential;
 mod messaging;
 mod model;
+mod profiles;
 mod qr_login;
 mod recovery;
 mod runtime;

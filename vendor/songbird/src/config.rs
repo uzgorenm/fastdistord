@@ -32,6 +32,13 @@ pub struct Config {
     /// fastdistord patch: refuse transport-only audio and DAVE passthrough.
     pub require_dave: bool,
     #[cfg(feature = "driver")]
+    /// Bounded structural handshake observations; wire data is never retained.
+    pub dave_handshake: std::sync::Arc<crate::DaveHandshake>,
+    #[cfg(feature = "driver")]
+    #[derivative(Debug = "ignore")]
+    /// Synchronous capture privacy gate on DAVE state changes.
+    pub dave_gate: Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
+    #[cfg(feature = "driver")]
     /// fastdistord patch: true only after an active, ready MLS transition.
     pub dave_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(feature = "driver")]
@@ -221,6 +228,10 @@ impl Default for Config {
             #[cfg(feature = "driver")]
             require_dave: false,
             #[cfg(feature = "driver")]
+            dave_handshake: std::sync::Arc::new(crate::DaveHandshake::default()),
+            #[cfg(feature = "driver")]
+            dave_gate: None,
+            #[cfg(feature = "driver")]
             dave_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "driver")]
             dave_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -276,14 +287,24 @@ impl Config {
         let _guard = self.dave_media_lock.lock();
         self.dave_ready
             .store(false, std::sync::atomic::Ordering::Release);
+        if let Some(gate) = &self.dave_gate {
+            gate(false);
+        }
+        self.dave_handshake.record(crate::DaveStage::MediaReady, 0);
         self.dave_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     pub(crate) fn publish_dave_ready(&self, ready: bool) {
         let guard = self.dave_media_lock.lock();
+        let ready = ready && guard.is_ok();
         self.dave_ready
-            .store(ready && guard.is_ok(), std::sync::atomic::Ordering::Release);
+            .store(ready, std::sync::atomic::Ordering::Release);
+        if let Some(gate) = &self.dave_gate {
+            gate(ready);
+        }
+        self.dave_handshake
+            .record(crate::DaveStage::MediaReady, u16::from(ready));
     }
 
     /// Sets this `Config`'s chosen cryptographic tagging scheme.

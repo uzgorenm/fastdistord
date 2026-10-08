@@ -10,6 +10,7 @@ const MAX_SOCIAL: usize = 1000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Friend {
     pub id: u64,
+    pub avatar: Option<String>,
     pub name: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub struct DirectChannel {
     pub id: u64,
     pub name: String,
     pub recipients: Vec<Friend>,
+    pub last_message_id: Option<u64>,
 }
 pub struct DirectChannelsSnapshot {
     pub channels: Vec<DirectChannel>,
@@ -45,6 +47,7 @@ pub fn parse_friends(value: &Value) -> Result<Vec<Friend>> {
         if seen.insert(id) {
             friends.push(Friend {
                 id,
+                avatar: crate::profiles::hash(&relationship["user"]["avatar"]),
                 name: display_name(&relationship["user"]),
             });
         }
@@ -107,6 +110,7 @@ pub fn parse_direct_channel(value: &Value) -> Result<DirectChannel> {
         }
         recipients.push(Friend {
             id,
+            avatar: crate::profiles::hash(&user["avatar"]),
             name: display_name(user),
         });
     }
@@ -128,12 +132,62 @@ pub fn parse_direct_channel(value: &Value) -> Result<DirectChannel> {
         id,
         name,
         recipients,
+        last_message_id: snowflake(&value["last_message_id"]),
     })
+}
+/// Latest DM Snowflake provides chronology without fetching conversation history.
+pub fn sort_by_activity(friends: &mut [Friend], channels: &[DirectChannel]) {
+    let recent: std::collections::HashMap<_, _> = channels
+        .iter()
+        .filter(|c| c.recipients.len() == 1)
+        .filter_map(|c| c.last_message_id.map(|m| (c.recipients[0].id, m)))
+        .fold(
+            std::collections::HashMap::<u64, u64>::new(),
+            |mut map, (id, m)| {
+                map.entry(id)
+                    .and_modify(|old| *old = (*old).max(m))
+                    .or_insert(m);
+                map
+            },
+        );
+    friends.sort_by(|a, b| {
+        recent
+            .get(&b.id)
+            .cmp(&recent.get(&a.id))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then(a.id.cmp(&b.id))
+    });
+}
+pub fn observe_message(channels: &mut [DirectChannel], channel: u64, message: u64) {
+    if let Some(dm) = channels.iter_mut().find(|c| c.id == channel) {
+        dm.last_message_id = Some(dm.last_message_id.unwrap_or(0).max(message));
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn friend_order_tracks_newest_known_dm_without_history_requests() {
+        let mut friends = parse_friends(&json!([
+            {"type":1,"user":{"id":"1","username":"Zed"}},
+            {"type":1,"user":{"id":"2","username":"Amy"}},
+            {"type":1,"user":{"id":"3","username":"Bob"}}
+        ]))
+        .unwrap();
+        let mut channels = parse_direct_channels(&json!([
+            {"id":"10","type":1,"recipients":[{"id":"1"}],"last_message_id":"500"},
+            {"id":"20","type":1,"recipients":[{"id":"2"}],"last_message_id":"400"}
+        ]))
+        .unwrap()
+        .channels;
+        sort_by_activity(&mut friends, &channels);
+        assert_eq!(friends.iter().map(|f| f.id).collect::<Vec<_>>(), [1, 2, 3]);
+        observe_message(&mut channels, 20, 600);
+        observe_message(&mut channels, 20, 300); // Stale replay cannot move activity backwards.
+        sort_by_activity(&mut friends, &channels);
+        assert_eq!(friends.iter().map(|f| f.id).collect::<Vec<_>>(), [2, 1, 3]);
+    }
     #[test]
     fn blocked_and_pending_relationships_never_become_friends() {
         let values = json!([

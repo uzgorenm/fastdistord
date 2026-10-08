@@ -30,6 +30,19 @@ impl OfflineGroup {
         .unwrap();
         alice.set_external_sender(&external).unwrap();
         bob.set_external_sender(&external).unwrap();
+        assert!(
+            !alice.is_ready() && !bob.is_ready(),
+            "a sole pending group must not expose a media ratchet"
+        );
+        assert!(alice.encrypt_opus(&[0xf8, 0xff, 0xfe]).is_err());
+        let empty = VLBytes::new(vec![]).tls_serialize_detached().unwrap();
+        assert!(
+            alice
+                .process_proposals(ProposalsOperationType::APPEND, &empty, Some(&[101]))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!alice.is_ready());
         let package = KeyPackageIn::tls_deserialize_exact_bytes(&bob.create_key_package().unwrap())
             .unwrap()
             .validate(
@@ -56,7 +69,15 @@ impl OfflineGroup {
             )
             .unwrap()
             .unwrap();
+        assert!(
+            !alice.is_ready() && !bob.is_ready(),
+            "preparing a commit is not negotiated media readiness"
+        );
         alice.process_commit(&result.commit).unwrap();
+        assert!(
+            alice.is_ready(),
+            "the creator establishes keys from its echoed commit without receiving a Welcome"
+        );
         bob.process_welcome(result.welcome.as_ref().unwrap())
             .unwrap();
         assert!(alice.is_ready() && bob.is_ready());

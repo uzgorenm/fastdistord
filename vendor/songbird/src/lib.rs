@@ -80,6 +80,10 @@
 )]
 
 mod config;
+#[cfg(feature = "driver")]
+mod dave_handshake;
+#[cfg(feature = "driver")]
+pub use dave_handshake::{DaveHandshake, DaveStage};
 pub mod constants;
 #[cfg(feature = "driver")]
 pub mod driver;

@@ -40,6 +40,7 @@ const SUPPRESSED: u64 = 4;
 const PTT_ENABLED: u64 = 8;
 const PTT_DOWN: u64 = 16;
 const PTT_KNOWN: u64 = 32;
+const ENCRYPTION_PENDING: u64 = 64;
 const FLAGS_MASK: u64 = 0xff;
 const TX_GENERATION_MASK: u64 = ((1_u64 << 28) - 1) << 8;
 const RX_GENERATION_MASK: u64 = ((1_u64 << 28) - 1) << 36;
@@ -67,7 +68,7 @@ struct GateSnapshot(u64);
 
 impl GateSnapshot {
     fn allowed(self) -> bool {
-        self.0 & (MUTED | DEAFENED | SUPPRESSED) == 0
+        self.0 & (MUTED | DEAFENED | SUPPRESSED | ENCRYPTION_PENDING) == 0
             && (self.0 & PTT_ENABLED == 0
                 || self.0 & (PTT_DOWN | PTT_KNOWN) == PTT_DOWN | PTT_KNOWN)
     }
@@ -122,6 +123,20 @@ impl TxGate {
     }
     pub fn set_suppressed(&self, value: bool) {
         self.flag(SUPPRESSED, value);
+    }
+    /// Separate from server suppression: a DAVE transition invalidates capture
+    /// and held PTT synchronously without clearing an administrator's gate.
+    pub fn set_encryption_pending(&self, pending: bool) {
+        self.change(|flags| {
+            if pending {
+                (flags | ENCRYPTION_PENDING) & !(PTT_DOWN | PTT_KNOWN)
+            } else {
+                flags & !ENCRYPTION_PENDING
+            }
+        });
+    }
+    pub fn encryption_pending(&self) -> bool {
+        self.snapshot().0 & ENCRYPTION_PENDING != 0
     }
     pub fn is_muted(&self) -> bool {
         self.snapshot().0 & MUTED != 0
@@ -1252,6 +1267,39 @@ mod tests {
         gate.set_deafened(true);
         gate.set_deafened(false);
         assert!(gate.is_muted());
+    }
+    #[test]
+    fn encryption_transition_discards_capture_and_does_not_clear_admin_or_ptt_gates() {
+        let (mut producer, mut reader, gate) = reader_fixture();
+        producer
+            .push(CaptureSample {
+                sample: 0.75,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        let before = gate.epoch();
+        gate.set_encryption_pending(true);
+        assert!(!gate.transmit_allowed());
+        gate.set_suppressed(true);
+        gate.set_encryption_pending(false);
+        assert!(!gate.transmit_allowed());
+        gate.set_suppressed(false);
+        assert_ne!(before, gate.epoch());
+        producer
+            .push(CaptureSample {
+                sample: 0.25,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        let mut bytes = [0; 8];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0.25);
+        gate.set_ptt_enabled(true);
+        gate.set_ptt_pressed(Some(true));
+        assert!(gate.transmit_allowed());
+        gate.set_encryption_pending(true);
+        gate.set_encryption_pending(false);
+        assert!(!gate.transmit_allowed());
     }
     #[test]
     fn mute_cycle_invalidates_queued_capture() {

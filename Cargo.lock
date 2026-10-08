@@ -1519,6 +1519,7 @@ dependencies = [
  "futures-util",
  "ghash",
  "global-hotkey",
+ "image",
  "objc2 0.6.5",
  "objc2-av-foundation",
  "objc2-core-foundation",

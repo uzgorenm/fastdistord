@@ -38,6 +38,7 @@ impl PersonalAccount {
         let client = Self { token, http };
         let user = client.get("/users/@me").await?;
         let account = Account {
+            avatar: crate::profiles::hash(&user["avatar"]),
             id: snowflake(&user["id"]).context("Account response had no valid user ID")?,
             name: display_name(&user),
         };
@@ -49,6 +50,7 @@ impl PersonalAccount {
             .take(250)
             .filter_map(|v| {
                 Some(Guild {
+                    icon: crate::profiles::hash(&v["icon"]),
                     id: snowflake(&v["id"])?,
                     name: v["name"].as_str()?.to_owned(),
                 })
@@ -250,6 +252,9 @@ pub enum GatewayEvent {
     Ready {
         resumed: bool,
     },
+    SelfPresence(crate::profiles::Presence),
+    RosterBegin(u64),
+    RosterComplete(u64, bool),
     Dispatch {
         kind: String,
         data: Value,
@@ -453,9 +458,16 @@ async fn gateway_loop(
                                         return Err(TerminalGateway.into());
                                     }
                                     events.send(GatewayEvent::Ready { resumed: false }).await?;
+                                    events
+                                        .send(GatewayEvent::SelfPresence(
+                                            crate::profiles::self_presence(&v["d"]["sessions"]),
+                                        ))
+                                        .await?;
+                                    emit_presences(&v["d"], &events).await?;
                                     if let Some(guilds) = v["d"]["guilds"].as_array() {
                                         for guild in guilds.iter().take(250) {
                                             emit_initial_voice_states(guild, &events).await?;
+                                            emit_presences(guild, &events).await?;
                                         }
                                     }
                                 }
@@ -464,10 +476,20 @@ async fn gateway_loop(
                                 }
                                 if kind == "GUILD_CREATE" {
                                     emit_initial_voice_states(&v["d"], &events).await?;
+                                    emit_presences(&v["d"], &events).await?;
+                                }
+                                if kind == "SESSIONS_REPLACE" {
+                                    events
+                                        .send(GatewayEvent::SelfPresence(
+                                            crate::profiles::self_presence(&v["d"]),
+                                        ))
+                                        .await?;
                                 }
                                 if matches!(
                                     kind,
-                                    "VOICE_STATE_UPDATE"
+                                    "PRESENCE_UPDATE"
+                                        | "USER_UPDATE"
+                                        | "VOICE_STATE_UPDATE"
                                         | "VOICE_SERVER_UPDATE"
                                         | "GUILD_DELETE"
                                         | "CHANNEL_DELETE"
@@ -562,6 +584,11 @@ async fn emit_initial_voice_states(
     let Some(states) = guild["voice_states"].as_array() else {
         return Ok(());
     };
+    events.send(GatewayEvent::RosterBegin(guild_id)).await?;
+    let complete = states.len() <= 250
+        && states
+            .iter()
+            .all(|v| snowflake(&v["user_id"]).is_some() && snowflake(&v["channel_id"]).is_some());
     for state in states.iter().take(250) {
         let mut state = state.clone();
         state["guild_id"] = Value::String(guild_id.to_string());
@@ -582,8 +609,37 @@ async fn emit_initial_voice_states(
             })
             .await?;
     }
+    events
+        .send(GatewayEvent::RosterComplete(guild_id, complete))
+        .await?;
     Ok(())
 }
+async fn emit_presences(data: &Value, events: &mpsc::Sender<GatewayEvent>) -> Result<()> {
+    let lists = [
+        data.get("presences"),
+        data.get("merged_presences").and_then(|m| m.get("friends")),
+    ];
+    for list in lists.into_iter().flatten().filter_map(Value::as_array) {
+        for p in list.iter().take(1000) {
+            if let Some(id) = snowflake(&p["user"]["id"]) {
+                // Retain neither activities nor session identifiers. Partial
+                // presence users must not erase an existing avatar.
+                let mut user = json!({"id":id.to_string()});
+                if let Some(avatar) = p["user"].get("avatar") {
+                    user["avatar"] = avatar.clone();
+                }
+                events
+                    .send(GatewayEvent::Dispatch {
+                        kind: "PRESENCE_UPDATE".into(),
+                        data: json!({"user":user,"status":p["status"]}),
+                    })
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

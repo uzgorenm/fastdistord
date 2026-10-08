@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::Result;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -78,6 +78,7 @@ struct PendingVoice {
     session: Option<String>,
     server: Option<(String, String)>,
     allow_initial_connect: bool,
+    roster_complete: bool,
 }
 impl PendingVoice {
     fn take_tokens(&mut self) -> Option<(String, String, String)> {
@@ -138,6 +139,7 @@ fn launch_transport(
     id: u64,
     tx: async_mpsc::Sender<ResultEvent>,
     events: async_mpsc::UnboundedSender<(u64, TransportEvent)>,
+    handshake: Arc<songbird::DaveHandshake>,
 ) -> tokio::task::JoinHandle<()> {
     let expected_session = gate.session();
     tokio::spawn(async move {
@@ -151,7 +153,7 @@ fn launch_transport(
         });
         let result = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            Transport::connect(info, gate, config, event_tx, expected_session),
+            Transport::connect(info, gate, config, event_tx, expected_session, handshake),
         )
         .await
         .unwrap_or_else(|_| Err(TransientVoiceFailure.into()));
@@ -194,6 +196,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     let mut recovery_tick = tokio::time::interval(Duration::from_millis(100));
     recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut roster = HashMap::<(u64, u64), (u64, Participant)>::new();
+    let mut complete_rosters = HashSet::new();
     let mut ui_visible = true;
     let mut repaint: Repaint = None;
     let mut client: Option<Arc<PersonalAccount>> = None;
@@ -280,6 +283,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         gateway.take();
                         client.take();
                         roster.clear();
+                        complete_rosters.clear();
                         pending = None;
                         if let Some(task) = connect_task.take() {
                             task.abort();
@@ -291,6 +295,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.phase = Phase::Connecting;
                             s.status = "Checking account access…".into();
                             s.account = None;
+                            s.profiles.clear();
                             s.friends.clear();
                             s.direct_channels.clear();
                             s.social_status.clear();
@@ -331,6 +336,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 gateway.take();
                                 client.take();
                                 roster.clear();
+                                complete_rosters.clear();
                                 pending = None;
                                 if let Some(task) = connect_task.take() {
                                     task.abort();
@@ -395,6 +401,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                         client.take();
                         roster.clear();
+                        complete_rosters.clear();
                         update(&state, &repaint, |s| {
                             let revision = s.revision;
                             *s = UiState::default();
@@ -630,6 +637,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         server_suppressed = false;
                         pending = Some(PendingVoice {
                             guild: guild_id,
+                            roster_complete: complete_rosters.contains(&guild_id),
                             private: false,
                             channel: channel_id,
                             allow_initial_connect: true,
@@ -841,7 +849,16 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 s.social_busy = false;
                                 s.social_status.clear();
                                 s.direct_channels.retain(|c| c.id != channel_id);
+                                for f in &channel.recipients {
+                                    if s.profiles.len() < 2048 || s.profiles.contains_key(&f.id) {
+                                        let p = s.profiles.entry(f.id).or_default();
+                                        if f.avatar.is_some() {
+                                            p.avatar = f.avatar.clone();
+                                        }
+                                    }
+                                }
                                 s.direct_channels.insert(0, channel);
+                                crate::social::sort_by_activity(&mut s.friends, &s.direct_channels);
                                 s.selected_dm = Some(channel_id);
                                 s.selected_text_channel = Some(channel_id);
                                 s.chat_busy = true;
@@ -890,6 +907,17 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         s.chat_busy = false;
                         match result {
                             Ok(messages) => {
+                                if let Some(last) = messages.iter().map(|m| m.id).max() {
+                                    crate::social::observe_message(
+                                        &mut s.direct_channels,
+                                        channel,
+                                        last,
+                                    );
+                                    crate::social::sort_by_activity(
+                                        &mut s.friends,
+                                        &s.direct_channels,
+                                    );
+                                }
                                 s.messages = messages;
                                 s.chat_status =
                                     "Latest 50 messages · Refresh to check for updates.".into();
@@ -909,6 +937,12 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         s.chat_sending = false;
                         match result {
                             Ok(message) => {
+                                crate::social::observe_message(
+                                    &mut s.direct_channels,
+                                    channel,
+                                    message.id,
+                                );
+                                crate::social::sort_by_activity(&mut s.friends, &s.direct_channels);
                                 s.messages.retain(|m| m.id != message.id);
                                 s.messages.push(message);
                                 s.messages.sort_by_key(|m| m.id);
@@ -941,6 +975,14 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         gateway = Some(c.gateway());
                         client = Some(Arc::new(c));
                         update(&state, &repaint, |s| {
+                            s.profiles.clear();
+                            s.profiles.insert(
+                                a.id,
+                                crate::profiles::Profile {
+                                    avatar: a.avatar.clone(),
+                                    ..Default::default()
+                                },
+                            );
                             s.account = Some(a);
                             s.guilds = guilds;
                             s.status = "Connecting Discord signaling…".into();
@@ -975,6 +1017,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
                 Some(ResultEvent::Transport(id, result)) if id == join_generation => match result {
                     Ok(t) => {
+                        let ready = t.media_ready();
                         recovery.config = Some(t.device_config());
                         recovery.retry = None;
                         recovery.budget.healthy(Instant::now());
@@ -1009,8 +1052,16 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             }
                         }
                         update(&state, &repaint, |s| {
-                            s.phase = Phase::VoiceReady;
-                            s.status = "Encrypted voice connected · headphones recommended".into();
+                            s.phase = if ready {
+                                Phase::VoiceReady
+                            } else {
+                                Phase::VoiceWaiting
+                            };
+                            s.status = if ready {
+                                "Encrypted voice connected · headphones recommended".into()
+                            } else {
+                                "Joined · waiting for encrypted voice; microphone closed".into()
+                            };
                         });
                     }
                     Err(error) => {
@@ -1056,6 +1107,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     signal_budget.healthy(Instant::now());
                     let restoring = resumed && recovery.schedule(join_generation, pending.as_ref());
                     update(&state, &repaint, |s| {
+                        for p in s.profiles.values_mut() {
+                            p.presence = crate::profiles::Presence::Unknown;
+                        }
                         s.phase = if restoring {
                             Phase::Reconnecting
                         } else {
@@ -1077,6 +1131,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     if let Some(task) = ring_task.take() {
                         task.abort();
                     }
+                    update(&state, &repaint, |s| {
+                        for p in s.profiles.values_mut() {
+                            p.presence = crate::profiles::Presence::Unknown;
+                        }
+                    });
                     signal_ready = false;
                     signal_deadline = None;
                     gate.set_suppressed(true);
@@ -1113,8 +1172,64 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         s.participants.clear();
                     });
                 }
+                Some(GatewayEvent::SelfPresence(presence)) => {
+                    update(&state, &repaint, |s| {
+                        if let Some(a) = &s.account {
+                            s.profiles.entry(a.id).or_default().presence = presence;
+                        }
+                    });
+                }
+                Some(GatewayEvent::RosterBegin(guild)) => {
+                    complete_rosters.remove(&guild);
+                    roster.retain(|(g, _), _| *g != guild);
+                    if let Some(p) = &mut pending
+                        && !p.private
+                        && p.guild == guild
+                    {
+                        p.roster_complete = false;
+                    }
+                    publish_roster_count(&state, pending.as_ref(), &roster);
+                }
+                Some(GatewayEvent::RosterComplete(guild, complete)) => {
+                    if complete {
+                        complete_rosters.insert(guild);
+                    }
+                    if let Some(p) = &mut pending
+                        && !p.private
+                        && p.guild == guild
+                    {
+                        p.roster_complete = complete;
+                    }
+                    publish_roster_count(&state, pending.as_ref(), &roster);
+                }
                 Some(GatewayEvent::Dispatch { kind, data }) => {
+                    if matches!(
+                        kind.as_str(),
+                        "PRESENCE_UPDATE" | "USER_UPDATE" | "MESSAGE_CREATE" | "VOICE_STATE_UPDATE"
+                    ) {
+                        update(&state, &repaint, |s| match kind.as_str() {
+                            "PRESENCE_UPDATE" => crate::profiles::presence(&mut s.profiles, &data),
+                            "USER_UPDATE" => crate::profiles::observe(&mut s.profiles, &data),
+                            "MESSAGE_CREATE" => {
+                                crate::profiles::observe(&mut s.profiles, &data["author"])
+                            }
+                            _ => crate::profiles::observe(&mut s.profiles, &data["member"]["user"]),
+                        });
+                    }
                     if kind == "MESSAGE_CREATE" {
+                        if let (Some(channel), Some(message)) = (
+                            account::snowflake(&data["channel_id"]),
+                            account::snowflake(&data["id"]),
+                        ) {
+                            update(&state, &repaint, |s| {
+                                crate::social::observe_message(
+                                    &mut s.direct_channels,
+                                    channel,
+                                    message,
+                                );
+                                crate::social::sort_by_activity(&mut s.friends, &s.direct_channels);
+                            });
+                        }
                         let s = snapshot(&state);
                         if let Some(channel) = s.selected_text_channel
                             && chat_channel_allowed(&s, channel)
@@ -1137,6 +1252,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     {
                         let own = snapshot(&state).account.as_ref().map(|a| a.id);
                         if let Some(states) = data["voice_states"].as_array() {
+                            p.roster_complete = states.len() <= 250
+                                && states.iter().all(|v| {
+                                    account::snowflake(&v["user_id"]).is_some()
+                                        && account::snowflake(&v["channel_id"]) == Some(p.channel)
+                                });
                             let channel = p.channel;
                             update(&state, &repaint, |s| {
                                 s.participants = states
@@ -1370,6 +1490,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         });
                         pending = None;
                     }
+                    publish_roster_count(&state, pending.as_ref(), &roster);
                     if signal_ready
                         && recovery.retry.is_none()
                         && recovery.config.is_none()
@@ -1404,6 +1525,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             join_generation,
                             results_tx.clone(),
                             voice_tx.clone(),
+                            snapshot(&state).voice_handshake,
                         ));
                     }
                 }
@@ -1436,7 +1558,25 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     continue;
                 }
                 match Some(event) {
-                    Some(TransportEvent::Ready) => {}
+                    Some(TransportEvent::Ready) => {
+                        if let Some(t) = &transport {
+                            recovery.config = Some(t.device_config());
+                            gate.set_ptt_pressed(None);
+                            update(&state, &repaint, |s| {
+                                s.phase = Phase::VoiceReady;
+                                s.status =
+                                    "Encrypted voice connected · headphones recommended".into();
+                            });
+                        }
+                    }
+                    Some(TransportEvent::Waiting) => {
+                        if transport.is_some() {
+                            update(&state, &repaint, |s| {
+                                s.phase = Phase::VoiceWaiting;
+                                s.status = "Joined · encryption pending; microphone closed".into();
+                            });
+                        }
+                    }
                     Some(TransportEvent::Speaking { user_id, speaking }) => {
                         update(&state, &repaint, |s| {
                             if let Some(p) = s.participants.iter_mut().find(|p| p.id == user_id) {
@@ -1551,6 +1691,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             join_generation,
                             results_tx.clone(),
                             voice_tx.clone(),
+                            snapshot(&state).voice_handshake,
                         ));
                     }
                 }
@@ -1599,6 +1740,33 @@ fn may_send_voice_flags(
 ) -> bool {
     signaling_ready && voice_active && authority_current
 }
+fn publish_roster_count(
+    state: &Shared,
+    pending: Option<&PendingVoice>,
+    roster: &HashMap<(u64, u64), (u64, Participant)>,
+) {
+    let s = snapshot(state);
+    let count = pending.filter(|p| p.roster_complete).and_then(|p| {
+        let own = s.account.as_ref()?.id;
+        if p.private {
+            s.participants
+                .iter()
+                .any(|u| u.id == own)
+                .then_some(s.participants.len())
+        } else {
+            (roster
+                .get(&(p.guild, own))
+                .is_some_and(|(channel, _)| *channel == p.channel))
+            .then(|| {
+                roster
+                    .iter()
+                    .filter(|((g, _), (c, _))| *g == p.guild && *c == p.channel)
+                    .count()
+            })
+        }
+    });
+    s.voice_handshake.set_roster_count(count);
+}
 fn apply_social_snapshot(
     state: &mut UiState,
     friends: Result<Vec<crate::social::Friend>>,
@@ -1628,6 +1796,20 @@ fn apply_social_snapshot(
             notices.push(format!("Conversations could not load: {error}"));
         }
     }
+    for f in state.friends.iter().chain(
+        state
+            .direct_channels
+            .iter()
+            .flat_map(|c| c.recipients.iter()),
+    ) {
+        if state.profiles.len() < 2048 || state.profiles.contains_key(&f.id) {
+            let p = state.profiles.entry(f.id).or_default();
+            if f.avatar.is_some() {
+                p.avatar = f.avatar.clone();
+            }
+        }
+    }
+    crate::social::sort_by_activity(&mut state.friends, &state.direct_channels);
     state.social_status = notices.join(" ");
 }
 fn chat_channel_allowed(s: &UiState, channel: u64) -> bool {
@@ -1759,6 +1941,42 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn idle_voice_requires_complete_roster_and_own_matching_channel() {
+        let state = Arc::new(Mutex::new(UiState {
+            account: Some(Account {
+                id: 1,
+                name: "Self".into(),
+                avatar: None,
+            }),
+            ..Default::default()
+        }));
+        let mut pending = PendingVoice {
+            guild: 10,
+            channel: 20,
+            ..Default::default()
+        };
+        let person = |id| Participant {
+            id,
+            name: "Member".into(),
+            speaking: false,
+            muted: true,
+            deafened: false,
+        };
+        let mut roster = HashMap::from([((10, 1), (20, person(1)))]);
+        publish_roster_count(&state, Some(&pending), &roster);
+        assert!(!snapshot(&state).voice_handshake.idle_without_peer());
+        pending.roster_complete = true;
+        publish_roster_count(&state, Some(&pending), &roster);
+        assert!(snapshot(&state).voice_handshake.idle_without_peer());
+        roster.insert((10, 2), (20, person(2)));
+        publish_roster_count(&state, Some(&pending), &roster);
+        assert!(!snapshot(&state).voice_handshake.idle_without_peer());
+        roster.remove(&(10, 2));
+        roster.insert((10, 1), (21, person(1)));
+        publish_roster_count(&state, Some(&pending), &roster);
+        assert!(!snapshot(&state).voice_handshake.idle_without_peer());
+    }
+    #[test]
     fn private_call_signaling_has_no_guild_and_rejects_other_channel() {
         let pending = PendingVoice {
             private: true,
@@ -1809,6 +2027,7 @@ mod tests {
             &mut state,
             Ok(vec![crate::social::Friend {
                 id: 20,
+                avatar: None,
                 name: "Friend".into(),
             }]),
             Err(anyhow::anyhow!("Unavailable")),
@@ -1823,9 +2042,11 @@ mod tests {
             Ok(crate::social::DirectChannelsSnapshot {
                 channels: vec![crate::social::DirectChannel {
                     id: 30,
+                    last_message_id: None,
                     name: "DM".into(),
                     recipients: vec![crate::social::Friend {
                         id: 40,
+                        avatar: None,
                         name: "Recipient".into(),
                     }],
                 }],
@@ -1846,6 +2067,7 @@ mod tests {
             selected_dm: Some(20),
             direct_channels: vec![crate::social::DirectChannel {
                 id: 20,
+                last_message_id: None,
                 name: "Friend".into(),
                 recipients: vec![],
             }],
@@ -2001,6 +2223,7 @@ mod tests {
                 server: None,
                 allow_initial_connect: false,
                 ring_pending: false,
+                roster_complete: false,
             },
         )
     }

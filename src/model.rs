@@ -4,11 +4,13 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
     pub id: u64,
+    pub avatar: Option<String>,
     pub name: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Guild {
     pub id: u64,
+    pub icon: Option<String>,
     pub name: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,12 +41,14 @@ pub enum Phase {
     SignalingReady,
     Joining,
     VoiceReady,
+    VoiceWaiting,
     Reconnecting,
     Failed,
 }
 #[derive(Clone, Debug)]
 pub struct UiState {
     pub account: Option<Account>,
+    pub profiles: std::collections::HashMap<u64, crate::profiles::Profile>,
     pub guilds: Vec<Guild>,
     pub channels: Vec<Channel>,
     pub participants: Vec<Participant>,
@@ -56,6 +60,7 @@ pub struct UiState {
     pub social_busy: bool,
     pub social_status: String,
     pub phase: Phase,
+    pub voice_handshake: Arc<songbird::DaveHandshake>,
     pub status: String,
     pub selected_guild: Option<u64>,
     pub selected_channel: Option<u64>,
@@ -82,6 +87,7 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             account: None,
+            profiles: Default::default(),
             guilds: vec![],
             channels: vec![],
             participants: vec![],
@@ -93,6 +99,7 @@ impl Default for UiState {
             social_busy: false,
             social_status: String::new(),
             phase: Phase::Offline,
+            voice_handshake: Arc::new(songbird::DaveHandshake::default()),
             status: String::new(),
             selected_guild: None,
             selected_channel: None,

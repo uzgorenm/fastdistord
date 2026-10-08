@@ -87,3 +87,23 @@ No Discord session was opened or microphone captured during implementation.
 Do not enable dependency TRACE logging: davey 0.1.4 includes cryptographic secret
 material in TRACE events. The application must compile those levels out and
 must not attach a subscriber that restores them in an altered dependency build.
+
+## Pending sole-member handshake
+
+`DaveHandshake` records bounded structural observations and an opt-in memory-only
+64-event trace. The application can wait without opening initial audio devices
+when its complete account Gateway voice roster confirms only itself is present.
+Unknown/incomplete rosters, multiple participants and MLS failures retain a
+bounded media handshake deadline. A locally prepared MLS group remains distinct
+from an executed transition; neither a timer nor peer absence makes it ready.
+
+A bounded public external-sender package is retained if it arrives before a
+version-zero session upgrades through PrepareEpoch. Readiness invalidation also
+closes the application's capture gate synchronously, revoking queued PCM and
+requiring a fresh PTT press. Existing packet-generation and media-lock guards
+continue to reject stale frames across prepare/execute transitions.
+
+Protocol: https://github.com/discord/dave-protocol/blob/main/protocol.md#sole-member-reset
+Offline crypto fixtures verify pending groups cannot encrypt Opus and that the
+creator's own accepted commit can establish a group without receiving Welcome.
+These checks do not establish live Discord interoperability.

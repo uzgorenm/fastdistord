@@ -64,6 +64,7 @@ impl Connection {
         let url = generate_url(&info.endpoint)?;
 
         let mut client = WsStream::connect(url).await?;
+        config.dave_handshake.record(crate::DaveStage::Connected, 0);
         let (ws_msg_tx, ws_msg_rx) = flume::unbounded();
 
         let mut hello = None;
@@ -79,6 +80,9 @@ impl Connection {
             }))
             .await?;
 
+        config
+            .dave_handshake
+            .record(crate::DaveStage::Identify, davey::DAVE_PROTOCOL_VERSION);
         loop {
             let Some(value) = client.recv_event().await? else {
                 continue;
@@ -186,7 +190,7 @@ impl Connection {
         }
 
         let (cipher, dave_session, dave_protocol_version) =
-            init_cipher(&mut client, &info, chosen_crypto, &ws_msg_tx).await?;
+            init_cipher(&mut client, &info, chosen_crypto, &ws_msg_tx, config).await?;
         let dave_session = Arc::new(RwLock::new(dave_session));
         let dave_protocol_version = Arc::new(dave_protocol_version);
 
@@ -361,6 +365,7 @@ async fn init_cipher(
     info: &ConnectionInfo,
     mode: CryptoMode,
     tx: &Sender<WsMessage>,
+    config: &Config,
 ) -> Result<(Cipher, Option<davey::DaveSession>, AtomicU16)> {
     loop {
         let Some(value) = client.recv_event().await? else {
@@ -369,6 +374,9 @@ async fn init_cipher(
 
         match value {
             GatewayEvent::SessionDescription(desc) => {
+                config
+                    .dave_handshake
+                    .record(crate::DaveStage::Protocol, desc.dave_protocol_version);
                 if desc.mode != mode.to_request_str() {
                     return Err(Error::CryptoModeInvalid);
                 }
@@ -391,6 +399,9 @@ async fn init_cipher(
                             }))
                             .await?;
 
+                        config
+                            .dave_handshake
+                            .record(crate::DaveStage::KeyPackage, 0);
                         Some(session)
                     } else {
                         None

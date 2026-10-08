@@ -4,7 +4,7 @@
 
 [Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Contribute](CONTRIBUTING.md)
 
-The sign-in screen offers fresh QR login with mobile approval or explicit macOS Keychain reconnect. Use **Friends | Servers** in one sidebar. Friends open conversations; server channels appear beneath the selected server. Call controls stay visible while you browse.
+The sign-in screen offers fresh QR login with mobile approval or explicit macOS Keychain reconnect. Use **Friends | Servers** in one sidebar. Friends open conversations; server channels appear beneath the selected server. Click the selected server to collapse or expand its channels. Friends follow recent DM activity; profile controls stay visible while you browse.
 
 ## Download and install
 

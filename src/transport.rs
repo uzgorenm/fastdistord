@@ -2,7 +2,7 @@
 //! The small vendored Songbird patch is mandatory: upstream's DriverConnect does not
 //! imply DAVE readiness, and upstream permits transport-only audio during negotiation.
 use crate::audio::{AudioConfig, AudioEngine, PlaybackSink, TxGate};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use songbird::{
     Config, ConnectionInfo, CoreEvent, Driver, Event, EventContext, EventHandler,
@@ -58,6 +58,7 @@ impl fmt::Debug for VoiceConnection {
 pub enum TransportEvent {
     /// Both the voice connection and negotiated DAVE session are ready.
     Ready,
+    Waiting,
     Disconnected {
         message: String,
         retryable: bool,
@@ -92,7 +93,8 @@ impl std::error::Error for TransientVoiceFailure {}
 /// Owns a single call. Dropping it closes privacy gates before stopping its workers.
 pub struct Transport {
     driver: Driver,
-    audio: Arc<AudioEngine>,
+    audio: Arc<OnceLock<Arc<AudioEngine>>>,
+    audio_config: Arc<Mutex<AudioConfig>>,
     gate: Arc<TxGate>,
     alive: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
@@ -105,10 +107,12 @@ impl Transport {
         config: AudioConfig,
         events: UnboundedSender<TransportEvent>,
         expected_session: u64,
+        handshake: Arc<songbird::DaveHandshake>,
     ) -> Result<Self> {
         if gate.session() != expected_session {
             bail!("Voice connection was superseded");
         }
+        handshake.begin();
         let connection = checked_connection(info)?;
         let armed_epoch = Arc::new(AtomicU64::new(DISARMED_EPOCH));
         let dave_ready = Arc::new(AtomicBool::new(false));
@@ -121,6 +125,15 @@ impl Transport {
             )))
             .mix_mode(MixMode::Mono);
         voice_config.require_dave = true;
+        voice_config.dave_handshake = handshake.clone();
+        voice_config.dave_gate = Some({
+            let gate = gate.clone();
+            Arc::new(move |ready| {
+                if gate.session() == expected_session {
+                    gate.set_encryption_pending(!ready);
+                }
+            })
+        });
         voice_config.dave_ready = dave_ready.clone();
         voice_config.driver_timeout = Some(Duration::from_secs(10).into());
         voice_config.packet_gate = Some({
@@ -181,37 +194,11 @@ impl Transport {
             }
             Err(_) => return Err(TransientVoiceFailure.into()),
         }
-        // DriverConnect only means transport negotiation completed. Never expose it as ready.
-        timeout(DAVE_TIMEOUT, async {
-            while !dave_ready.load(Ordering::Acquire) {
-                if !alive.load(Ordering::Acquire) || gate.session() != expected_session {
-                    if gate.session() == expected_session
-                        && transient_failure.load(Ordering::Acquire)
-                    {
-                        return Err(TransientVoiceFailure.into());
-                    }
-                    bail!("Discord voice disconnected before end-to-end encryption was ready");
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("DAVE end-to-end encryption did not become ready; microphone stayed closed")??;
-
+        // Stay joined with capture closed while the sole member's MLS group
+        // is pending. Media startup belongs to the readiness monitor, not the
+        // transport handshake. No Davey readiness or ratchet is fabricated.
         if gate.session() != expected_session {
             bail!("Voice connection was superseded");
-        }
-        // No audio device is opened until the MLS session has been verified ready.
-        let audio =
-            Arc::new(AudioEngine::start(config, gate.clone()).map_err(|_| AudioOpenFailure)?);
-        let _ = playback.set(audio.playback());
-        let _ = audio_health.set(audio.clone());
-        if !dave_ready.load(Ordering::Acquire)
-            || !alive.load(Ordering::Acquire)
-            || gate.session() != expected_session
-        {
-            bail!("End-to-end encryption changed during audio startup; reconnect to try again");
         }
         let driver = pending.driver.clone();
         // Disarm the failure guard without creating a leaked Driver reference.
@@ -219,7 +206,8 @@ impl Transport {
         drop(pending);
         let mut transport = Self {
             driver,
-            audio,
+            audio: audio_health,
+            audio_config: Arc::new(Mutex::new(config)),
             gate,
             alive,
             monitor: None,
@@ -229,6 +217,9 @@ impl Transport {
             MonitorState {
                 expected_session,
                 audio: transport.audio.clone(),
+                audio_config: transport.audio_config.clone(),
+                playback,
+                handshake,
                 gate: transport.gate.clone(),
                 alive: transport.alive.clone(),
                 dave_ready,
@@ -236,10 +227,14 @@ impl Transport {
                 events: events.clone(),
             },
         ));
-        let _ = events.send(TransportEvent::Ready);
         Ok(transport)
     }
 
+    pub fn media_ready(&self) -> bool {
+        self.audio.get().is_some()
+            && self.alive.load(Ordering::Acquire)
+            && !self.gate.encryption_pending()
+    }
     pub fn mute(&mut self, muted: bool) {
         self.gate.set_muted(muted);
         self.driver.mute(muted || self.gate.is_deafened());
@@ -251,18 +246,34 @@ impl Transport {
     }
 
     pub fn set_output_volume(&mut self, volume: f32) {
-        self.audio.set_output_volume(volume);
+        if let Ok(mut config) = self.audio_config.lock() {
+            config.output_volume = volume;
+        }
+        if let Some(audio) = self.audio.get() {
+            audio.set_output_volume(volume);
+        }
     }
 
     pub fn device_config(&self) -> AudioConfig {
-        self.audio.device_config()
+        self.audio
+            .get()
+            .map(|audio| audio.device_config())
+            .unwrap_or_else(|| {
+                self.audio_config
+                    .lock()
+                    .map(|c| c.clone())
+                    .unwrap_or_default()
+            })
     }
     pub fn diagnostics(&self) -> String {
-        let stats = self.audio.stats();
+        let Some(audio) = self.audio.get() else {
+            return "Audio devices closed while encryption is pending".into();
+        };
+        let stats = audio.stats();
         format!(
             "Input {} Hz · Output {} Hz · Suppressed {} · Capture overruns {} · Playback overruns {} · Playback underruns {}",
-            self.audio.input_sample_rate,
-            self.audio.output_sample_rate,
+            audio.input_sample_rate,
+            audio.output_sample_rate,
             self.gate.is_suppressed(),
             stats.capture_overruns,
             stats.playback_overruns,
@@ -271,12 +282,14 @@ impl Transport {
     }
 
     pub fn meter(&self) -> f32 {
-        self.audio.meter()
+        self.audio.get().map_or(0.0, |audio| audio.meter())
     }
 
     pub fn shutdown(&mut self) {
         self.alive.store(false, Ordering::Release);
-        self.audio.stop();
+        if let Some(audio) = self.audio.get() {
+            audio.stop();
+        }
         self.driver.mute(true);
         self.driver.stop();
         self.driver.leave();
@@ -318,7 +331,10 @@ fn epoch_allows_transmit(gate: &TxGate, armed: &AtomicU64, expected_session: u64
 
 struct MonitorState {
     expected_session: u64,
-    audio: Arc<AudioEngine>,
+    audio: Arc<OnceLock<Arc<AudioEngine>>>,
+    audio_config: Arc<Mutex<AudioConfig>>,
+    playback: Arc<OnceLock<PlaybackSink>>,
+    handshake: Arc<songbird::DaveHandshake>,
     gate: Arc<TxGate>,
     alive: Arc<AtomicBool>,
     dave_ready: Arc<AtomicBool>,
@@ -326,10 +342,25 @@ struct MonitorState {
     events: UnboundedSender<TransportEvent>,
 }
 
+#[derive(Default)]
+struct EncryptionDeadline(Option<Instant>);
+impl EncryptionDeadline {
+    fn expired(&mut self, now: Instant, may_idle: bool) -> bool {
+        if may_idle {
+            self.0 = None;
+            return false;
+        }
+        now.duration_since(*self.0.get_or_insert(now)) >= DAVE_TIMEOUT
+    }
+}
+
 fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
     let MonitorState {
         expected_session,
         audio,
+        audio_config,
+        playback,
+        handshake,
         gate,
         alive,
         dave_ready,
@@ -339,10 +370,11 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_millis(10));
         let mut installed_epoch = DISARMED_EPOCH;
-        let mut negotiating_since = None;
+        let mut deadline = EncryptionDeadline::default();
+        let mut media_announced = false;
         while alive.load(Ordering::Acquire) && gate.session() == expected_session {
             tick.tick().await;
-            if audio.has_failed() {
+            if audio.get().is_some_and(|audio| audio.has_failed()) {
                 let _ = events.send(TransportEvent::DeviceFailure(
                     "An audio device stopped; reselect the microphone or speaker and reconnect"
                         .into(),
@@ -354,19 +386,58 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                 installed_epoch = DISARMED_EPOCH;
                 driver.mute(true);
                 driver.stop();
-                let since = negotiating_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= DAVE_TIMEOUT {
+                if media_announced {
+                    let _ = events.send(TransportEvent::Waiting);
+                    media_announced = false;
+                }
+                if handshake.idle_without_peer() {
+                    deadline.expired(Instant::now(), true);
+                    continue;
+                }
+                if deadline.expired(Instant::now(), false) {
                     let _ = events.send(TransportEvent::Disconnected {
-                        message:
-                            "DAVE end-to-end encryption could not be renewed; microphone closed"
-                                .into(),
+                        message: format!(
+                            "DAVE handshake stalled: {}; microphone stayed closed",
+                            handshake.summary()
+                        ),
                         retryable: false,
                     });
                     break;
                 }
                 continue;
             }
-            negotiating_since = None;
+            deadline.expired(Instant::now(), true);
+            if audio.get().is_none() {
+                let config = match audio_config.lock() {
+                    Ok(c) => c.clone(),
+                    Err(_) => break,
+                };
+                let engine = match AudioEngine::start(config, gate.clone()) {
+                    Ok(engine) => Arc::new(engine),
+                    Err(_) => {
+                        let _ = events.send(TransportEvent::DeviceFailure(
+                            "Could not open the selected microphone or speaker".into(),
+                        ));
+                        break;
+                    }
+                };
+                if gate.session() != expected_session || !alive.load(Ordering::Acquire) {
+                    engine.stop();
+                    break;
+                }
+                let _ = playback.set(engine.playback());
+                let _ = audio.set(engine);
+            }
+            let Some(audio) = audio.get() else {
+                break;
+            };
+            if !dave_ready.load(Ordering::Acquire) {
+                continue;
+            }
+            if !media_announced {
+                let _ = events.send(TransportEvent::Ready);
+                media_announced = true;
+            }
             let epoch = gate.epoch();
             if epoch != installed_epoch {
                 // The packet callback has already blocked the old epoch synchronously.
@@ -423,7 +494,9 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
             }
         }
         armed.store(DISARMED_EPOCH, Ordering::Release);
-        audio.stop();
+        if let Some(audio) = audio.get() {
+            audio.stop();
+        }
         alive.store(false, Ordering::Release);
         driver.mute(true);
         driver.stop();
@@ -627,6 +700,17 @@ mod tests {
             endpoint: "wss://voice.discord.media:443".into(),
             token: "private-token".into(),
         }
+    }
+    #[test]
+    fn solo_wait_has_no_media_deadline_but_peer_join_is_bounded() {
+        let start = Instant::now();
+        let mut deadline = EncryptionDeadline::default();
+        assert!(!deadline.expired(start, true));
+        assert!(!deadline.expired(start + Duration::from_secs(60), true));
+        assert!(!deadline.expired(start + Duration::from_secs(61), false));
+        assert!(deadline.expired(start + Duration::from_secs(76), false));
+        assert!(!deadline.expired(start + Duration::from_secs(77), true));
+        assert!(!deadline.expired(start + Duration::from_secs(78), false));
     }
     #[test]
     fn connection_debug_never_exposes_credentials() {
