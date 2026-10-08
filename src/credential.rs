@@ -55,7 +55,7 @@ pub enum Presence {
 pub fn presence() -> Presence {
     #[cfg(target_os = "macos")]
     {
-        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+        use security_framework::item::{ItemClass, ItemSearchOptions};
         match ItemSearchOptions::new()
             .class(ItemClass::generic_password())
             .service(SERVICE)
@@ -64,7 +64,6 @@ pub fn presence() -> Presence {
             .load_data(false)
             .load_refs(false)
             .skip_authenticated_items(true)
-            .limit(Limit::Max(1))
             .search()
         {
             Ok(items) if !items.is_empty() => Presence::Found,
