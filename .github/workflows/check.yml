@@ -43,6 +43,8 @@ jobs:
           $deps = & $dumpbin.FullName /dependents target/release/fastdistord.exe
           $deps | Write-Output
           if ($LASTEXITCODE -ne 0 -or ($deps -match '(MSVCP|VCRUNTIME)[0-9_]*\.dll')) { throw 'Unbundled VC runtime dependency' }
+      - name: Collect dependency notices
+        run: python scripts/collect-notices.py
       - name: Mac bundle and DMG
         if: runner.os == 'macOS'
         run: |

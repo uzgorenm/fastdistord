@@ -10,6 +10,8 @@ install -Dm755 "$BINARY" "$STAGE/usr/bin/fastdistord"
 install -Dm644 packaging/linux/fastdistord.desktop "$STAGE/usr/share/applications/fastdistord.desktop"
 install -Dm644 LICENSE "$STAGE/usr/share/doc/fastdistord/copyright"
 mkdir -p "$STAGE/DEBIAN" dist
+[ -f dist/third-party/NOTICE_COLLECTION_COMPLETE ] || python3 scripts/collect-notices.py
+cp -R dist/third-party "$STAGE/usr/share/doc/fastdistord/third-party"
 # Derive runtime dependencies from the actual linked release executable.
 SOURCE_DIR=$(pwd)
 mkdir -p "$STAGE/debian"

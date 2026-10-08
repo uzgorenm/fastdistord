@@ -8,7 +8,7 @@ The public-facing version is **0.01**, tag **v0.01**; Cargo and native package m
 - Windows x64: NSIS 3.11 compiles `packaging/windows/installer.nsi`. It installs for the current user, creates Start menu shortcuts and includes an uninstaller. No administrator access or automatic app launch. Not Authenticode signed.
 - Linux amd64: `scripts/package-linux.sh` creates a `.deb` with desktop entry and license. Runtime dependencies are derived from the actual executable, with required dynamically loaded GUI libraries included. Built on Ubuntu 24.04; compatible Debian/Ubuntu distributions only.
 
-Build with Rust 1.99.0, CMake and the prerequisites in [Getting started](docs/GETTING_STARTED.md). All dependencies are locked. Native tools/compiler versions can still affect output; this is not a bit-for-bit reproducibility claim.
+Build with Rust 1.99.0, CMake and the prerequisites in [Getting started](docs/GETTING_STARTED.md). Installers include upstream dependency/source notices, font licensing and Songbird patch attribution. All dependencies are locked. Native tools/compiler versions can still affect output; this is not a bit-for-bit reproducibility claim.
 
 ## Release verification
 
