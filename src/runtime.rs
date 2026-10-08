@@ -40,6 +40,8 @@ fn reset_chat(
     }
     update(state, repaint, |s| {
         s.text_channels.clear();
+        s.selected_dm = None;
+        s.social_busy = false;
         s.selected_text_channel = None;
         s.messages.clear();
         s.chat_busy = false;
@@ -53,6 +55,16 @@ enum ResultEvent {
         Result<(PersonalAccount, Account, Vec<Guild>)>,
         Option<zeroize::Zeroizing<String>>,
     ),
+    Social(
+        u64,
+        u64,
+        Result<(
+            Vec<crate::social::Friend>,
+            Vec<crate::social::DirectChannel>,
+        )>,
+    ),
+    OpenedDm(u64, u64, Result<crate::social::DirectChannel>),
+    Ring(u64, Result<()>),
     Channels(u64, u64, Result<Vec<Channel>>),
     TextChannels(u64, u64, u64, Result<Vec<crate::messaging::TextChannel>>),
     Messages(u64, u64, u64, Result<Vec<crate::messaging::ChatMessage>>),
@@ -62,6 +74,8 @@ enum ResultEvent {
 #[derive(Default)]
 struct PendingVoice {
     guild: u64,
+    private: bool,
+    ring_pending: bool,
     channel: u64,
     session: Option<String>,
     server: Option<(String, String)>,
@@ -108,7 +122,7 @@ impl CallRecovery {
         *self = Self::default();
     }
     fn authorized(&self, pending: Option<&PendingVoice>) -> bool {
-        matches!((&self.info,&self.config,pending),(Some(info),Some(config),Some(p)) if config.input_device.is_some()&&config.output_device.is_some()&&info.guild_id==p.guild && info.channel_id==p.channel && p.session.as_deref()==Some(info.session_id.as_str()))
+        matches!((&self.info,&self.config,pending),(Some(info),Some(config),Some(p)) if config.input_device.is_some()&&config.output_device.is_some()&&info.guild_id==(!p.private).then_some(p.guild) && info.channel_id==p.channel && p.session.as_deref()==Some(info.session_id.as_str()))
     }
     fn schedule(&mut self, generation: u64, pending: Option<&PendingVoice>) -> bool {
         if !self.authorized(pending) {
@@ -192,6 +206,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     let mut pending: Option<PendingVoice> = None;
     let mut connect_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut voice_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut ring_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut chat_generation = 0_u64;
     let (results_tx, mut results) = async_mpsc::channel(8);
@@ -226,10 +241,14 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     Command::Connect { .. }
                         | Command::Logout
                         | Command::Join { .. }
+                        | Command::CallDm(_)
                         | Command::Leave
                         | Command::Reconnect
                         | Command::Quit
                 ) {
+                    if let Some(task) = ring_task.take() {
+                        task.abort();
+                    }
                     recovery.revoke();
                     signal_retry = None;
                     signal_resume = None;
@@ -274,6 +293,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.phase = Phase::Connecting;
                             s.status = "Checking account access…".into();
                             s.account = None;
+                            s.friends.clear();
+                            s.direct_channels.clear();
+                            s.social_status.clear();
+                            s.selected_call_dm = None;
+                            s.selected_call_guild = None;
+                            s.selected_channel = None;
+                            s.selected_guild = None;
                             s.guilds.clear();
                             s.channels.clear();
                             s.participants.clear();
@@ -382,6 +408,82 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             };
                         });
                     }
+                    Command::SelectHome => {
+                        if snapshot(&state).chat_sending {
+                            continue;
+                        }
+                        if let Some(c) = client.clone() {
+                            reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
+                            let (id, request, tx) =
+                                (generation, chat_generation, results_tx.clone());
+                            update(&state, &repaint, |s| {
+                                s.selected_guild = None;
+                                s.channels.clear();
+                                s.social_busy = true;
+                                s.social_status = "Loading friends and conversations…".into();
+                            });
+                            chat_task = Some(tokio::spawn(async move {
+                                let result =
+                                    async { Ok((c.friends().await?, c.direct_channels().await?)) }
+                                        .await;
+                                let _ = tx.send(ResultEvent::Social(id, request, result)).await;
+                            }));
+                        }
+                    }
+                    Command::OpenDm(user) => {
+                        let s = snapshot(&state);
+                        if s.chat_sending
+                            || s.social_busy
+                            || s.selected_guild.is_some()
+                            || !s.friends.iter().any(|f| f.id == user)
+                        {
+                            continue;
+                        }
+                        if let Some(c) = client.clone() {
+                            reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
+                            let (id, request, tx) =
+                                (generation, chat_generation, results_tx.clone());
+                            update(&state, &repaint, |s| {
+                                s.social_busy = true;
+                                s.social_status = "Opening conversation…".into();
+                            });
+                            chat_task = Some(tokio::spawn(async move {
+                                let result = c.open_dm(user).await;
+                                let _ = tx.send(ResultEvent::OpenedDm(id, request, result)).await;
+                            }));
+                        }
+                    }
+                    Command::SelectDm(channel) => {
+                        let s = snapshot(&state);
+                        if s.social_busy
+                            || s.chat_sending
+                            || s.selected_guild.is_some()
+                            || !s.direct_channels.iter().any(|c| c.id == channel)
+                        {
+                            continue;
+                        }
+                        if let Some(c) = client.clone() {
+                            if let Some(task) = chat_task.take() {
+                                task.abort();
+                            }
+                            chat_generation = chat_generation.wrapping_add(1);
+                            let (id, request, tx) =
+                                (generation, chat_generation, results_tx.clone());
+                            update(&state, &repaint, |s| {
+                                s.selected_dm = Some(channel);
+                                s.selected_text_channel = Some(channel);
+                                s.messages.clear();
+                                s.chat_busy = true;
+                                s.chat_status = "Loading messages…".into();
+                            });
+                            chat_task = Some(tokio::spawn(async move {
+                                let result = c.messages(channel).await;
+                                let _ = tx
+                                    .send(ResultEvent::Messages(id, request, channel, result))
+                                    .await;
+                            }));
+                        }
+                    }
                     Command::SelectGuild(guild) => {
                         if snapshot(&state).chat_sending {
                             continue;
@@ -432,6 +534,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             let (id, request, tx) =
                                 (generation, chat_generation, results_tx.clone());
                             update(&state, &repaint, |s| {
+                                s.selected_dm = None;
                                 s.selected_text_channel = Some(channel);
                                 s.messages.clear();
                                 s.chat_busy = true;
@@ -474,10 +577,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         let s = snapshot(&state);
                         if s.chat_busy
                             || s.selected_text_channel != Some(channel_id)
-                            || !s
-                                .text_channels
-                                .iter()
-                                .any(|c| c.id == channel_id && Some(c.guild_id) == s.selected_guild)
+                            || !chat_channel_allowed(&s, channel_id)
                         {
                             continue;
                         }
@@ -516,6 +616,10 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         {
                             continue;
                         }
+                        gate.set_suppressed(true);
+                        if let (Some(g), Some(p)) = (&gateway, &pending) {
+                            let _ = g.commands.send(voice_command(p, None, true, false)).await;
+                        }
                         join_generation = join_generation.wrapping_add(1);
                         gate.begin_session();
                         gate.set_suppressed(true);
@@ -527,6 +631,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         server_suppressed = false;
                         pending = Some(PendingVoice {
                             guild: guild_id,
+                            private: false,
                             channel: channel_id,
                             allow_initial_connect: true,
                             ..Default::default()
@@ -535,6 +640,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.phase = Phase::Joining;
                             s.status = "Joining encrypted voice…".into();
                             s.selected_channel = Some(channel_id);
+                            s.selected_call_dm = None;
+                            s.selected_call_guild = Some(guild_id);
                             s.participants = roster
                                 .iter()
                                 .filter(|((g, _), (c, _))| *g == guild_id && *c == channel_id)
@@ -554,6 +661,62 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 .await;
                         }
                     }
+                    Command::CallDm(channel_id) => {
+                        let s = snapshot(&state);
+                        if !signal_ready
+                            || gateway.is_none()
+                            || s.account.is_none()
+                            || matches!(s.phase, Phase::Joining | Phase::Reconnecting)
+                            || !s
+                                .direct_channels
+                                .iter()
+                                .any(|c| c.id == channel_id && c.recipients.len() == 1)
+                        {
+                            continue;
+                        }
+                        gate.set_suppressed(true);
+                        if let (Some(g), Some(p)) = (&gateway, &pending) {
+                            let _ = g.commands.send(voice_command(p, None, true, false)).await;
+                        }
+                        cancel_voice(
+                            &gate,
+                            &mut join_generation,
+                            &mut transport,
+                            &mut pending,
+                            &mut voice_task,
+                        );
+                        server_suppressed = false;
+                        pending = Some(PendingVoice {
+                            guild: channel_id,
+                            private: true,
+                            ring_pending: true,
+                            channel: channel_id,
+                            allow_initial_connect: true,
+                            ..Default::default()
+                        });
+                        update(&state, &repaint, |s| {
+                            s.phase = Phase::Joining;
+                            s.status = "Connecting call…".into();
+                            s.selected_channel = Some(channel_id);
+                            s.selected_call_dm = Some(channel_id);
+                            s.selected_call_guild = None;
+                            s.participants.clear();
+                        });
+                        if let Some(g) = &gateway {
+                            let _ = g
+                                .commands
+                                .send(GatewayCommand::RequestCall { channel_id })
+                                .await;
+                            let _ = g
+                                .commands
+                                .send(GatewayCommand::PrivateVoice {
+                                    channel_id: Some(channel_id),
+                                    muted: s.muted,
+                                    deafened: s.deafened,
+                                })
+                                .await;
+                        }
+                    }
                     Command::Leave => {
                         join_generation = join_generation.wrapping_add(1);
                         gate.begin_session();
@@ -564,15 +727,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             task.abort();
                         }
                         if let (Some(g), Some(p)) = (&gateway, pending.take()) {
-                            let _ = g
-                                .commands
-                                .send(GatewayCommand::Voice {
-                                    guild_id: p.guild,
-                                    channel_id: None,
-                                    muted: true,
-                                    deafened: false,
-                                })
-                                .await;
+                            let _ = g.commands.send(voice_command(&p, None, true, false)).await;
                         }
                         update(&state, &repaint, |s| {
                             s.phase = if s.account.is_some() {
@@ -582,6 +737,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             };
                             s.status = "Left voice. Microphone released.".into();
                             s.selected_channel = None;
+                            s.selected_call_dm = None;
+                            s.selected_call_guild = None;
                             s.participants.clear();
                             s.input_level = 0.0;
                         });
@@ -662,6 +819,65 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
             }
             Incoming::Result(event) => match event {
+                Some(ResultEvent::Social(id, request, result))
+                    if id == generation
+                        && request == chat_generation
+                        && snapshot(&state).selected_guild.is_none() =>
+                {
+                    chat_task.take();
+                    update(&state, &repaint, |s| {
+                        s.social_busy = false;
+                        match result {
+                            Ok((friends, channels)) => {
+                                s.friends = friends;
+                                s.direct_channels = channels;
+                                s.social_status.clear();
+                            }
+                            Err(error) => s.social_status = error.to_string(),
+                        }
+                    });
+                }
+                Some(ResultEvent::OpenedDm(id, request, result))
+                    if id == generation
+                        && request == chat_generation
+                        && snapshot(&state).selected_guild.is_none() =>
+                {
+                    chat_task.take();
+                    match result {
+                        Ok(channel) => {
+                            let channel_id = channel.id;
+                            update(&state, &repaint, |s| {
+                                s.social_busy = false;
+                                s.social_status.clear();
+                                s.direct_channels.retain(|c| c.id != channel_id);
+                                s.direct_channels.insert(0, channel);
+                                s.selected_dm = Some(channel_id);
+                                s.selected_text_channel = Some(channel_id);
+                                s.chat_busy = true;
+                            });
+                            if let Some(c) = client.clone() {
+                                let tx = results_tx.clone();
+                                chat_task = Some(tokio::spawn(async move {
+                                    let result = c.messages(channel_id).await;
+                                    let _ = tx
+                                        .send(ResultEvent::Messages(
+                                            id, request, channel_id, result,
+                                        ))
+                                        .await;
+                                }));
+                            }
+                        }
+                        Err(error) => update(&state, &repaint, |s| {
+                            s.social_busy = false;
+                            s.social_status = error.to_string();
+                        }),
+                    }
+                }
+                Some(ResultEvent::Ring(id, Err(error))) if id == join_generation => {
+                    update(&state, &repaint, |s| {
+                        s.status = format!("Call connected, but ringing failed: {error}")
+                    });
+                }
                 Some(ResultEvent::TextChannels(id, request, guild, result))
                     if id == generation
                         && request == chat_generation
@@ -781,6 +997,26 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         gate.set_ptt_pressed(None);
                         gate.set_suppressed(server_suppressed);
                         transport = Some(t);
+                        if let Some(p) = &mut pending
+                            && p.private
+                            && p.ring_pending
+                        {
+                            p.ring_pending = false;
+                            if let Some(c) = client.clone() {
+                                let channel = p.channel;
+                                let recipients = snapshot(&state)
+                                    .direct_channels
+                                    .iter()
+                                    .find(|d| d.id == channel)
+                                    .map(|d| d.recipients.iter().map(|u| u.id).collect::<Vec<_>>())
+                                    .unwrap_or_default();
+                                let tx = results_tx.clone();
+                                ring_task = Some(tokio::spawn(async move {
+                                    let result = c.ring(channel, &recipients).await;
+                                    let _ = tx.send(ResultEvent::Ring(id, result)).await;
+                                }));
+                            }
+                        }
                         update(&state, &repaint, |s| {
                             s.phase = Phase::VoiceReady;
                             s.status = "Encrypted voice connected · headphones recommended".into();
@@ -847,6 +1083,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     retryable,
                     resume,
                 }) => {
+                    if let Some(task) = ring_task.take() {
+                        task.abort();
+                    }
                     signal_ready = false;
                     signal_deadline = None;
                     gate.set_suppressed(true);
@@ -884,9 +1123,103 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     });
                 }
                 Some(GatewayEvent::Dispatch { kind, data }) => {
+                    if kind == "MESSAGE_CREATE" {
+                        let s = snapshot(&state);
+                        if let Some(channel) = s.selected_text_channel
+                            && chat_channel_allowed(&s, channel)
+                            && let Ok(message) = crate::messaging::parse_message(&data, channel)
+                        {
+                            update(&state, &repaint, |s| {
+                                s.messages.retain(|m| m.id != message.id);
+                                s.messages.push(message);
+                                s.messages.sort_by_key(|m| m.id);
+                                if s.messages.len() > crate::messaging::MAX_HISTORY {
+                                    s.messages.remove(0);
+                                }
+                            });
+                        }
+                    }
+                    if kind == "CALL_CREATE"
+                        && let Some(p) = &mut pending
+                        && p.private
+                        && account::snowflake(&data["channel_id"]) == Some(p.channel)
+                    {
+                        let own = snapshot(&state).account.as_ref().map(|a| a.id);
+                        if let Some(states) = data["voice_states"].as_array() {
+                            let channel = p.channel;
+                            update(&state, &repaint, |s| {
+                                s.participants = states
+                                    .iter()
+                                    .filter(|v| {
+                                        account::snowflake(&v["channel_id"]) == Some(channel)
+                                    })
+                                    .filter_map(|v| {
+                                        let id = account::snowflake(&v["user_id"])?;
+                                        Some(Participant {
+                                            id,
+                                            name: s
+                                                .direct_channels
+                                                .iter()
+                                                .find(|c| c.id == channel)
+                                                .and_then(|c| {
+                                                    c.recipients.iter().find(|u| u.id == id)
+                                                })
+                                                .map(|u| u.name.clone())
+                                                .or_else(|| {
+                                                    s.account
+                                                        .as_ref()
+                                                        .filter(|a| a.id == id)
+                                                        .map(|a| a.name.clone())
+                                                })
+                                                .unwrap_or_else(|| "Participant".into()),
+                                            speaking: false,
+                                            muted: v["self_mute"].as_bool().unwrap_or(false),
+                                            deafened: v["self_deaf"].as_bool().unwrap_or(false),
+                                        })
+                                    })
+                                    .take(250)
+                                    .collect();
+                            });
+                            for voice in states {
+                                if p.allow_initial_connect
+                                    && account::snowflake(&voice["user_id"]) == own
+                                    && account::snowflake(&voice["channel_id"]) == Some(p.channel)
+                                {
+                                    p.session = voice["session_id"].as_str().map(str::to_owned);
+                                }
+                            }
+                        }
+                    }
+                    if kind == "CALL_DELETE"
+                        && pending.as_ref().is_some_and(|p| {
+                            p.private && account::snowflake(&data["channel_id"]) == Some(p.channel)
+                        })
+                    {
+                        if let Some(task) = ring_task.take() {
+                            task.abort();
+                        }
+                        recovery.revoke();
+                        cancel_voice(
+                            &gate,
+                            &mut join_generation,
+                            &mut transport,
+                            &mut pending,
+                            &mut voice_task,
+                        );
+                        update(&state, &repaint, |s| {
+                            s.phase = Phase::SignalingReady;
+                            s.selected_channel = None;
+                            s.selected_call_dm = None;
+                            s.selected_call_guild = None;
+                            s.participants.clear();
+                            s.status = "Call ended.".into();
+                        });
+                    }
                     if kind == "VOICE_SERVER_UPDATE"
                         && let Some(info) = &mut recovery.info
-                        && account::snowflake(&data["guild_id"]) == Some(info.guild_id)
+                        && account::snowflake(&data["guild_id"]) == info.guild_id
+                        && (info.guild_id.is_some()
+                            || account::snowflake(&data["channel_id"]) == Some(info.channel_id))
                     {
                         if let (Some(endpoint), Some(token)) =
                             (data["endpoint"].as_str(), data["token"].as_str())
@@ -902,7 +1235,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     }
                     if kind == "VOICE_SERVER_UPDATE"
                         && let Some(p) = &mut pending
-                        && account::snowflake(&data["guild_id"]) == Some(p.guild)
+                        && voice_event_matches(&data, p)
+                        && (!p.private
+                            || account::snowflake(&data["channel_id"]) == Some(p.channel))
                     {
                         if let (Some(endpoint), Some(token)) =
                             (data["endpoint"].as_str(), data["token"].as_str())
@@ -927,13 +1262,20 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     }
                     if kind == "VOICE_STATE_UPDATE"
                         && let Some(p) = &mut pending
-                        && account::snowflake(&data["guild_id"]) == Some(p.guild)
+                        && voice_state_matches(
+                            &data,
+                            p,
+                            snapshot(&state).account.as_ref().map(|a| a.id),
+                        )
                     {
                         let user = account::snowflake(&data["user_id"]);
                         let channel = account::snowflake(&data["channel_id"]);
                         let own = snapshot(&state).account.as_ref().map(|a| a.id) == user;
                         if own {
                             if channel != Some(p.channel) {
+                                if let Some(task) = ring_task.take() {
+                                    task.abort();
+                                }
                                 recovery.revoke();
                                 gate.set_suppressed(true);
                                 transport.take();
@@ -990,12 +1332,21 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 {
                                     s.participants.push(Participant {
                                         id,
-                                        name: roster
-                                            .get(&(
-                                                account::snowflake(&data["guild_id"]).unwrap_or(0),
-                                                id,
-                                            ))
-                                            .map(|(_, p)| p.name.clone())
+                                        name: s
+                                            .direct_channels
+                                            .iter()
+                                            .find(|c| Some(c.id) == s.selected_call_dm)
+                                            .and_then(|c| c.recipients.iter().find(|u| u.id == id))
+                                            .map(|u| u.name.clone())
+                                            .or_else(|| {
+                                                roster
+                                                    .get(&(
+                                                        account::snowflake(&data["guild_id"])
+                                                            .unwrap_or(0),
+                                                        id,
+                                                    ))
+                                                    .map(|(_, p)| p.name.clone())
+                                            })
                                             .unwrap_or_else(|| format!("User {id}")),
                                         speaking: false,
                                         muted: data["mute"].as_bool().unwrap_or(false)
@@ -1039,7 +1390,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         && let Some(user) = snapshot(&state).account
                     {
                         let info = VoiceConnection {
-                            guild_id: p.guild,
+                            guild_id: (!p.private).then_some(p.guild),
                             channel_id: p.channel,
                             user_id: user.id,
                             session_id,
@@ -1163,6 +1514,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 let now = Instant::now();
                 if signal_deadline.is_some_and(|deadline| now >= deadline) {
                     gateway = None;
+                    if let Some(task) = ring_task.take() {
+                        task.abort();
+                    }
                     signal_ready = false;
                     signal_deadline = None;
                     signal_retry = if signal_resume.is_some() {
@@ -1254,6 +1608,49 @@ fn may_send_voice_flags(
 ) -> bool {
     signaling_ready && voice_active && authority_current
 }
+fn chat_channel_allowed(s: &UiState, channel: u64) -> bool {
+    if s.selected_guild.is_none() {
+        s.selected_dm == Some(channel) && s.direct_channels.iter().any(|c| c.id == channel)
+    } else {
+        s.text_channels
+            .iter()
+            .any(|c| c.id == channel && Some(c.guild_id) == s.selected_guild)
+    }
+}
+fn voice_command(
+    p: &PendingVoice,
+    channel_id: Option<u64>,
+    muted: bool,
+    deafened: bool,
+) -> GatewayCommand {
+    if p.private {
+        GatewayCommand::PrivateVoice {
+            channel_id,
+            muted,
+            deafened,
+        }
+    } else {
+        GatewayCommand::Voice {
+            guild_id: p.guild,
+            channel_id,
+            muted,
+            deafened,
+        }
+    }
+}
+fn voice_event_matches(data: &serde_json::Value, p: &PendingVoice) -> bool {
+    if p.private {
+        data["guild_id"].is_null()
+            && (data["channel_id"].is_null()
+                || account::snowflake(&data["channel_id"]) == Some(p.channel))
+    } else {
+        account::snowflake(&data["guild_id"]) == Some(p.guild)
+    }
+}
+fn voice_state_matches(data: &serde_json::Value, p: &PendingVoice, own: Option<u64>) -> bool {
+    voice_event_matches(data, p)
+        || own.is_some_and(|id| account::snowflake(&data["user_id"]) == Some(id))
+}
 async fn send_voice_flags(
     gateway: &Option<Gateway>,
     pending: &Option<PendingVoice>,
@@ -1263,12 +1660,12 @@ async fn send_voice_flags(
         let s = snapshot(state);
         let _ = g
             .commands
-            .send(GatewayCommand::Voice {
-                guild_id: p.guild,
-                channel_id: Some(p.channel),
-                muted: s.muted || s.deafened,
-                deafened: s.deafened,
-            })
+            .send(voice_command(
+                p,
+                Some(p.channel),
+                s.muted || s.deafened,
+                s.deafened,
+            ))
             .await;
     }
 }
@@ -1319,6 +1716,9 @@ fn permission_event_affects_call(
     let Some(p) = pending else {
         return false;
     };
+    if p.private {
+        return kind == "CHANNEL_DELETE" && account::snowflake(&data["id"]) == Some(p.channel);
+    }
     match kind {
         "GUILD_DELETE" | "GUILD_UPDATE" => account::snowflake(&data["id"]) == Some(p.guild),
         "CHANNEL_DELETE" | "CHANNEL_UPDATE" => account::snowflake(&data["id"]) == Some(p.channel),
@@ -1337,9 +1737,70 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn private_call_signaling_has_no_guild_and_rejects_other_channel() {
+        let pending = PendingVoice {
+            private: true,
+            guild: 20,
+            channel: 20,
+            ..Default::default()
+        };
+        assert!(matches!(
+            voice_command(&pending, Some(20), true, false),
+            GatewayCommand::PrivateVoice {
+                channel_id: Some(20),
+                ..
+            }
+        ));
+        assert!(voice_event_matches(
+            &json!({"guild_id":null,"channel_id":"20"}),
+            &pending
+        ));
+        assert!(!voice_event_matches(
+            &json!({"guild_id":"20","channel_id":"20"}),
+            &pending
+        ));
+        assert!(!voice_event_matches(
+            &json!({"guild_id":null,"channel_id":"21"}),
+            &pending
+        ));
+    }
+    #[test]
+    fn own_voice_move_is_observed_even_outside_private_call_scope() {
+        let pending = PendingVoice {
+            guild: 20,
+            private: true,
+            channel: 20,
+            ..Default::default()
+        };
+        let moved = json!({"guild_id":"99","channel_id":"21","user_id":"42"});
+        assert!(voice_state_matches(&moved, &pending, Some(42)));
+        assert!(!voice_state_matches(&moved, &pending, Some(43)));
+        assert!(!voice_state_matches(&moved, &pending, None));
+    }
+    #[test]
+    fn dm_sends_require_selected_known_private_channel() {
+        let mut state = UiState {
+            selected_dm: Some(20),
+            direct_channels: vec![crate::social::DirectChannel {
+                id: 20,
+                name: "Friend".into(),
+                recipients: vec![],
+            }],
+            ..Default::default()
+        };
+        assert!(chat_channel_allowed(&state, 20));
+        assert!(!chat_channel_allowed(&state, 21));
+        state.selected_guild = Some(20);
+        assert!(!chat_channel_allowed(&state, 20));
+        state.selected_guild = None;
+        state.selected_dm = None;
+        assert!(!chat_channel_allowed(&state, 20));
+    }
+    #[test]
     fn unrelated_permission_events_do_not_interrupt() {
         let p = PendingVoice {
             guild: 1,
+            private: false,
             channel: 2,
             ..Default::default()
         };
@@ -1452,7 +1913,7 @@ mod tests {
     }
     fn authorized_recovery() -> (CallRecovery, PendingVoice) {
         let info = VoiceConnection {
-            guild_id: 1,
+            guild_id: Some(1),
             channel_id: 2,
             user_id: 3,
             session_id: "test-session".into(),
@@ -1471,10 +1932,12 @@ mod tests {
             },
             PendingVoice {
                 guild: 1,
+                private: false,
                 channel: 2,
                 session: Some("test-session".into()),
                 server: None,
                 allow_initial_connect: false,
+                ring_pending: false,
             },
         )
     }

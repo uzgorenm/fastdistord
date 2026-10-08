@@ -2,6 +2,7 @@
 //! This is not Discord's bot API, an approved OAuth integration, or a promise of account safety.
 use crate::messaging::{self, ChatMessage, TextChannel};
 use crate::model::{Account, Channel, Guild};
+use crate::social::{self, DirectChannel, Friend};
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -81,7 +82,8 @@ impl PersonalAccount {
                 bail!("Discord denied account or channel access. No retry or bypass was attempted.")
             }
             429 => bail!("Discord rate limited the request. Wait before trying again."),
-            200 => {}
+            200 | 201 => {}
+            204 => return Ok(Value::Null),
             _ => bail!(
                 "Discord request failed with HTTP {}",
                 response.status().as_u16()
@@ -105,6 +107,45 @@ impl PersonalAccount {
         }
         serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("Discord returned an invalid response."))
+    }
+    /// One bounded snapshot; never sends friend requests or changes relationships.
+    pub async fn friends(&self) -> Result<Vec<Friend>> {
+        social::parse_friends(&self.get("/users/@me/relationships").await?)
+    }
+    pub async fn direct_channels(&self) -> Result<Vec<DirectChannel>> {
+        social::parse_direct_channels(&self.get("/users/@me/channels").await?)
+    }
+    /// Only from selecting a friend. Reuses an existing DM when present.
+    pub async fn open_dm(&self, user_id: u64) -> Result<DirectChannel> {
+        messaging::validate_id(user_id)?;
+        let value = self
+            .request(
+                reqwest::Method::POST,
+                "/users/@me/channels",
+                Some(json!({"recipient_id": user_id.to_string()})),
+            )
+            .await?;
+        let channel = social::parse_direct_channel(&value)?;
+        if value["type"].as_u64() != Some(1)
+            || channel.recipients.len() != 1
+            || channel.recipients[0].id != user_id
+        {
+            bail!("Discord returned a different conversation than requested.");
+        }
+        Ok(channel)
+    }
+    /// An explicit Call action may ring these recipients only after a call exists.
+    /// No automatic ring, retry or arbitrary recipient notifications.
+    pub async fn ring(&self, channel_id: u64, recipient_ids: &[u64]) -> Result<()> {
+        messaging::validate_id(channel_id)?;
+        let recipients = ring_payload(recipient_ids)?;
+        self.request(
+            reqwest::Method::POST,
+            &format!("/channels/{channel_id}/call/ring"),
+            Some(recipients),
+        )
+        .await?;
+        Ok(())
     }
     pub async fn text_channels(&self, guild_id: u64) -> Result<Vec<TextChannel>> {
         messaging::validate_id(guild_id)?;
@@ -180,6 +221,14 @@ pub enum GatewayCommand {
         channel_id: Option<u64>,
         muted: bool,
         deafened: bool,
+    },
+    PrivateVoice {
+        channel_id: Option<u64>,
+        muted: bool,
+        deafened: bool,
+    },
+    RequestCall {
+        channel_id: u64,
     },
     Close,
 }
@@ -332,6 +381,32 @@ async fn gateway_loop(
                     let update = json!({"op":4,"d":{"guild_id":guild_id.to_string(),"channel_id":channel_id.map(|id|id.to_string()),"self_mute":muted,"self_deaf":deafened}});
                     write.send(Message::Text(update.to_string().into())).await?;
                 }
+                Some(GatewayCommand::PrivateVoice {
+                    channel_id,
+                    muted,
+                    deafened,
+                }) => {
+                    if channel_id == Some(0) {
+                        bail!("Choose a valid conversation.");
+                    }
+                    write
+                        .send(Message::Text(
+                            private_voice_payload(channel_id, muted, deafened)
+                                .to_string()
+                                .into(),
+                        ))
+                        .await?;
+                }
+                Some(GatewayCommand::RequestCall { channel_id }) => {
+                    messaging::validate_id(channel_id)?;
+                    write
+                        .send(Message::Text(
+                            json!({"op":13,"d":{"channel_id":channel_id.to_string()}})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await?;
+                }
                 Some(GatewayCommand::Close) | None => {
                     let _ = write.close().await;
                     return Ok(());
@@ -401,6 +476,16 @@ async fn gateway_loop(
                                         | "GUILD_ROLE_UPDATE"
                                         | "GUILD_ROLE_DELETE"
                                         | "GUILD_UPDATE"
+                                        | "CALL_CREATE"
+                                        | "CALL_UPDATE"
+                                        | "CALL_DELETE"
+                                        | "RELATIONSHIP_ADD"
+                                        | "RELATIONSHIP_UPDATE"
+                                        | "RELATIONSHIP_REMOVE"
+                                        | "CHANNEL_CREATE"
+                                        | "MESSAGE_CREATE"
+                                        | "MESSAGE_UPDATE"
+                                        | "MESSAGE_DELETE"
                                 ) {
                                     events
                                         .send(GatewayEvent::Dispatch {
@@ -425,6 +510,24 @@ async fn gateway_loop(
             }
         }
     }
+}
+// Reverse-engineered private call protocol: guild_id must remain JSON null.
+fn private_voice_payload(channel_id: Option<u64>, muted: bool, deafened: bool) -> Value {
+    json!({"op":4,"d":{"guild_id":null,"channel_id":channel_id.map(|id|id.to_string()),
+        "self_mute":muted,"self_deaf":deafened}})
+}
+fn ring_payload(recipient_ids: &[u64]) -> Result<Value> {
+    if recipient_ids.is_empty() || recipient_ids.len() > 25 {
+        bail!("Choose the call recipients before ringing.");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in recipient_ids {
+        messaging::validate_id(*id)?;
+        if !seen.insert(*id) {
+            bail!("Call recipients must be unique.");
+        }
+    }
+    Ok(json!({"recipients":recipient_ids.iter().map(u64::to_string).collect::<Vec<_>>()}))
 }
 fn validated_resume_url(value: Option<&str>) -> Option<String> {
     let url = reqwest::Url::parse(value?).ok()?;
@@ -484,6 +587,17 @@ async fn emit_initial_voice_states(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_calls_do_not_impersonate_guild_voice_or_ring_everyone() {
+        let payload = private_voice_payload(Some(42), true, false);
+        assert!(payload["d"]["guild_id"].is_null());
+        assert_eq!(payload["d"]["channel_id"], "42");
+        assert!(private_voice_payload(None, true, true)["d"]["channel_id"].is_null());
+        assert_eq!(ring_payload(&[42]).unwrap(), json!({"recipients":["42"]}));
+        for recipients in [vec![], vec![0], vec![42, 42], vec![1; 26]] {
+            assert!(ring_payload(&recipients).is_err());
+        }
+    }
     #[test]
     fn snowflakes_reject_zero_and_garbage() {
         assert_eq!(snowflake(&json!("123")), Some(123));

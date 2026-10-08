@@ -71,7 +71,7 @@ impl Connection {
 
         client
             .send_json(&GatewayEvent::from(Identify {
-                server_id: info.guild_id.into(),
+                server_id: info.server_id(),
                 session_id: info.session_id.clone(),
                 token: info.token.clone(),
                 user_id: info.user_id.into(),
@@ -300,7 +300,7 @@ impl Connection {
 
         client
             .send_json(&GatewayEvent::from(Resume {
-                server_id: self.info.guild_id.into(),
+                server_id: self.info.server_id(),
                 session_id: self.info.session_id.clone(),
                 token: self.info.token.clone(),
             }))

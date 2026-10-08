@@ -47,6 +47,24 @@ it does not implement or replace any encryption, MLS, codec, or packet format.
 
 ## Verification and limits
 
+The standalone driver accepts a private call with `guild_id: None`. Voice
+Identify and Resume then use the real DM channel ID as `server_id`; guild calls
+continue using their guild ID. Connect/disconnect event metadata keeps the
+optional guild rather than fabricating one. The bot gateway frontend still
+creates guild calls only. This adds private-call routing, not bot access to DMs.
+Private-channel `server_id` routing is described by the reverse-engineered
+reference https://docs.discord.food/topics/voice-connections, rather than
+Discord's official bot API documentation; live user-account compatibility is
+still unverified.
+
+The application accepts strictly validated Discord voice authorities with no
+port, TLS port 443, documented port 2048, or the historically observed port 80.
+Songbird always connects with WSS and keeps explicit nondefault ports. The
+official example is in https://docs.discord.com/developers/topics/voice-connections;
+the port-80 report is https://github.com/discord/discord-api-docs/issues/1694.
+Other ports, schemes, hosts, credentials, paths and malformed DNS labels fail
+without echoing the supplied address.
+
 The application transport tests cover credential-safe diagnostics, endpoint
 validation, channel-ID mapping, invalid IDs, and capture-epoch revocation.
 `src/driver/dave_policy.rs` contains dependency-free production policy tests for

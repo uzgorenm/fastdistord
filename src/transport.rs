@@ -32,7 +32,8 @@ const DISARMED_EPOCH: u64 = u64::MAX;
 /// The endpoint/token/session must come from this user's current Gateway session.
 #[derive(Clone)]
 pub struct VoiceConnection {
-    pub guild_id: u64,
+    /// None for private calls; their voice server ID is the channel ID.
+    pub guild_id: Option<u64>,
     pub channel_id: u64,
     pub user_id: u64,
     pub session_id: String,
@@ -554,31 +555,54 @@ fn checked_connection(info: VoiceConnection) -> Result<ConnectionInfo> {
         NonZeroU64::new(id)
             .ok_or_else(|| anyhow!("Voice connection contains an invalid Discord ID"))
     };
-    let endpoint = info
-        .endpoint
-        .strip_prefix("wss://")
-        .unwrap_or(&info.endpoint)
-        .trim_end_matches(":443");
-    if endpoint.is_empty()
-        || endpoint.len() > 253
-        || !endpoint
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        || !(endpoint.ends_with(".discord.media") || endpoint.ends_with(".discord.gg"))
-    {
-        bail!("Gateway supplied an invalid Discord voice endpoint");
-    }
+    let endpoint = checked_endpoint(&info.endpoint)?;
     if info.session_id.is_empty() || info.token.is_empty() {
         bail!("Voice credentials are incomplete");
     }
     Ok(ConnectionInfo {
         channel_id: nz(info.channel_id)?.into(),
-        guild_id: nz(info.guild_id)?.into(),
+        guild_id: info.guild_id.map(|id| nz(id).map(Into::into)).transpose()?,
         user_id: nz(info.user_id)?.into(),
-        endpoint: endpoint.to_owned(),
+        endpoint,
         session_id: info.session_id,
         token: info.token,
     })
+}
+
+/// Accept only a Discord voice authority; Songbird always supplies `wss://`.
+/// Discord's voice documentation includes an explicit :2048 authority. Keep
+/// that port instead of rejecting it or silently connecting to a different one.
+fn checked_endpoint(raw: &str) -> Result<String> {
+    let authority = raw.strip_prefix("wss://").unwrap_or(raw);
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if host.is_empty()
+        || host.len() > 253
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        bail!("Discord supplied a malformed voice server address. Rejoin voice.");
+    }
+    let host = host.to_ascii_lowercase();
+    if !(host.ends_with(".discord.media") || host.ends_with(".discord.gg")) {
+        bail!("Discord supplied an untrusted voice server address. Rejoin voice.");
+    }
+    match port {
+        None | Some("443") => Ok(host),
+        // :80 has appeared in Discord Gateway voice updates; it is still
+        // contacted with TLS, never an insecure ws:// fallback.
+        Some(port @ ("80" | "2048")) => Ok(format!("{host}:{port}")),
+        _ => bail!("Discord supplied an unsupported voice server port. Rejoin voice."),
+    }
 }
 
 #[cfg(test)]
@@ -586,7 +610,7 @@ mod tests {
     use super::*;
     fn credentials() -> VoiceConnection {
         VoiceConnection {
-            guild_id: 1,
+            guild_id: Some(1),
             channel_id: 2,
             user_id: 3,
             session_id: "private-session".into(),
@@ -607,15 +631,81 @@ mod tests {
         assert_eq!(info.endpoint, "voice.discord.media");
     }
     #[test]
+    fn private_call_uses_channel_as_voice_server_id_without_a_guild() {
+        let mut info = credentials();
+        info.guild_id = None;
+        let info = checked_connection(info).unwrap();
+        assert!(info.guild_id.is_none());
+        assert_eq!(info.channel_id.0.get(), 2);
+        assert_eq!(info.server_id().0, 2);
+        assert_eq!(checked_connection(credentials()).unwrap().server_id().0, 1);
+    }
+    #[test]
     fn rejects_credential_forwarding_endpoints_without_echoing_them() {
         for endpoint in [
             "attacker.example",
             "discord.media.attacker.example",
             "private-token@voice.discord.media",
             "voice.discord.media/private-token",
+            "ws://voice.discord.media",
+            "https://voice.discord.media",
+            "voice.discord.media:443/private-token",
+            "voice.discord.media?token=private-token",
+            "voice.discord.media#private-token",
+            "127.0.0.1:443",
+            "[::1]:443",
+            "voice..discord.media",
+            "-voice.discord.media",
+            "voice-.discord.media",
+            "voice.discord.media.",
         ] {
             let mut info = credentials();
             info.endpoint = endpoint.into();
+            let error = checked_connection(info).unwrap_err().to_string();
+            assert!(!error.contains("private-token"));
+        }
+    }
+    #[test]
+    fn supports_discord_voice_authorities_with_documented_ports() {
+        for (endpoint, expected) in [
+            (
+                "sweetwater-12345.discord.media:2048",
+                "sweetwater-12345.discord.media:2048",
+            ),
+            (
+                "wss://sweetwater-12345.discord.media:2048",
+                "sweetwater-12345.discord.media:2048",
+            ),
+            (
+                "eu-central396.discord.media:80",
+                "eu-central396.discord.media:80",
+            ),
+            ("voice.discord.gg", "voice.discord.gg"),
+            ("wss://VOICE.DISCORD.MEDIA:443", "voice.discord.media"),
+        ] {
+            let mut info = credentials();
+            info.endpoint = endpoint.into();
+            assert_eq!(checked_connection(info).unwrap().endpoint, expected);
+        }
+    }
+    #[test]
+    fn rejects_unrecognized_or_malformed_voice_ports() {
+        for port in [
+            "",
+            "0",
+            "22",
+            "8080",
+            "65536",
+            "-443",
+            "+443",
+            "0443",
+            "443:443",
+            "443:80",
+            "443/",
+            "private-token",
+        ] {
+            let mut info = credentials();
+            info.endpoint = format!("voice.discord.media:{port}");
             let error = checked_connection(info).unwrap_err().to_string();
             assert!(!error.contains("private-token"));
         }

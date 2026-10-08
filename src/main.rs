@@ -8,6 +8,7 @@ mod model;
 mod qr_login;
 mod recovery;
 mod runtime;
+mod social;
 mod transport;
 mod ui;
 fn main() -> anyhow::Result<()> {

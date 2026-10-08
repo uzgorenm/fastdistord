@@ -7,14 +7,16 @@
 | Control | Behavior |
 |---|---|
 | Connect | Explicitly opts into the unofficial adapter and checks the entered account |
-| Server/channel | Browses available voice channels; selecting does not join |
-| Join | Joins the selected channel and opens audio only after DAVE readiness |
+| Friends / Servers | Switches the sidebar list; server channels appear inline |
+| Friend | Opens a private conversation without calling |
+| Call | Starts the selected individual DM call; rings its recipient after encrypted voice is ready |
+| Join · channel | Joins that voice channel and opens audio only after DAVE readiness |
 | Mute | Immediately closes outgoing audio; buffered pre-mute samples are invalidated |
 | Deafen | Silences receive audio and closes outgoing audio |
 | Push to talk | While unmuted, hold Ctrl+Shift+Space or the visible Talk control |
 | Settings | Device selection, output volume and account controls |
 | Reconnect | Restarts failed signaling with the in-memory credential; explicitly rejoin voice afterward |
-| Leave | Ends voice and releases both audio devices |
+| Disconnect | Ends voice and releases both audio devices |
 | Log out | Clears the account and removes a saved macOS Keychain credential |
 | Quit | Stops audio and exits, including a hidden active call |
 
@@ -22,9 +24,9 @@ PTT starts disabled. Modifier-only hotkeys are not used. The global shortcut is 
 
 ## Text channels
 
-Choose **Text**, select a server and text channel, then read its latest 50 messages. **Refresh** fetches a new snapshot; history does not update automatically. The voice controls remain available during text use.
+Choose a friend, or choose **Servers**, a server and its text channel. The app loads the latest 50 messages and listens for new messages in the selected conversation. **Refresh** fetches a new history snapshot. Call controls remain available while browsing.
 
-Type plain text and press **Send**. Enter adds a line rather than sending. Messages are limited to 2000 characters. The app suppresses mentions, text-to-speech and link embeds. Attachments, threads, reactions, edits and direct messages are not supported. Empty-content messages display a placeholder; they may contain unsupported attachments or system content.
+Type plain text and press **Send**. Enter adds a line rather than sending. Messages are limited to 2000 characters. The app suppresses mentions, text-to-speech and link embeds. Attachments, threads, reactions and edits are not supported. Empty-content messages display a placeholder; they may contain unsupported attachments or system content.
 
 Sending disables server/channel changes until the response arrives. A failed send keeps the draft. If its outcome is uncertain, refresh history before retrying to avoid duplicates. Switching text channels or servers clears the unsent draft. Logout cancels pending text work and clears displayed history. Channel changes, successful sends and logout also erase the editor undo history, so Undo cannot restore a draft from an earlier scope.
 

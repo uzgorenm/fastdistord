@@ -8,8 +8,8 @@ pub struct ConnectData<'a> {
     ///
     /// This can be used to reconnect/renew a voice session via the gateway.
     pub channel_id: ChannelId,
-    /// ID of the target voice channel's parent guild.
-    pub guild_id: GuildId,
+    /// ID of the parent guild, or None for a private call.
+    pub guild_id: Option<GuildId>,
     /// Unique string describing this session for validation/authentication purposes.
     pub session_id: &'a str,
     /// The domain name of Discord's voice/TURN server.

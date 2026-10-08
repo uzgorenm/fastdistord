@@ -102,6 +102,14 @@ struct VoiceApp {
     last_tray_revision: Option<u64>,
     local_error: Option<String>,
     text_open: bool,
+    friends_open: bool,
+    home_requested: bool,
+    last_server: Option<u64>,
+    last_dm: Option<u64>,
+    last_server_chat: Option<u64>,
+    pending_chat_restore: Option<u64>,
+    pending_dm_restore: Option<u64>,
+    call_label: String,
     message_draft: String,
     draft_channel: Option<u64>,
     draft_reset_pending: bool,
@@ -160,7 +168,15 @@ impl VoiceApp {
             shutdown_sent: false,
             last_tray_revision: None,
             local_error: None,
-            text_open: false,
+            text_open: true,
+            friends_open: true,
+            home_requested: false,
+            last_server: None,
+            last_dm: None,
+            last_server_chat: None,
+            pending_chat_restore: None,
+            pending_dm_restore: None,
+            call_label: String::new(),
             message_draft: String::new(),
             draft_channel: None,
             draft_reset_pending: false,
@@ -179,11 +195,19 @@ impl VoiceApp {
         if matches!(&command, Command::Logout | Command::Quit) {
             self.qr_login = None;
             self.qr_code = None;
+            self.home_requested = false;
+            self.last_server = None;
+            self.last_dm = None;
+            self.last_server_chat = None;
+            self.pending_chat_restore = None;
         }
         if matches!(
             &command,
             Command::SelectGuild(_)
                 | Command::SelectTextChannel(_)
+                | Command::SelectHome
+                | Command::SelectDm(_)
+                | Command::OpenDm(_)
                 | Command::Logout
                 | Command::Quit
         ) {
@@ -303,146 +327,253 @@ impl VoiceApp {
     }
 
     fn header(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        ui.horizontal_wrapped(|ui| {
-            waveform(ui, theme::ACCENT, Vec2::new(25.0, 28.0));
-            ui.add_space(5.0);
+        ui.horizontal(|ui| {
+            waveform(ui, theme::ACCENT, Vec2::new(20.0, 22.0));
             ui.label(
-                RichText::new("fastdistord").font(fastframe_fonts::Weight::SemiBold.font_id(18.0)),
+                RichText::new("fastdistord").font(fastframe_fonts::Weight::SemiBold.font_id(16.0)),
             );
-            ui.add_space(10.0);
-            if state.account.is_some() {
-                ui.selectable_value(&mut self.text_open, false, "Voice");
-                ui.selectable_value(&mut self.text_open, true, "Text");
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Settings").clicked() {
+                if ui.small_button("Settings").clicked() {
                     self.settings_open = true;
                     self.selected_input = state.selected_input.clone();
                     self.selected_output = state.selected_output.clone();
                     self.send(Command::RefreshDevices);
                 }
-                ui.add_space(8.0);
-                status_badge(ui, state.phase);
             });
         });
     }
 
     fn navigation(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        ui.set_width(184.0);
-        section_label(ui, "SERVERS");
-        ui.add_space(8.0);
-        let guild_height = (ui.available_height() * 0.36).clamp(85.0, 185.0);
+        let width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(60.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !state.chat_sending,
+                    egui::Button::new("Friends")
+                        .selected(self.friends_open)
+                        .min_size(Vec2::new(width, 34.0)),
+                )
+                .clicked()
+                && !self.friends_open
+            {
+                self.friends_open = true;
+                self.text_open = true;
+                self.browsing_channel = None;
+                self.send(Command::SelectHome);
+                self.pending_dm_restore = self.last_dm;
+            }
+            if ui
+                .add_enabled(
+                    !state.chat_sending,
+                    egui::Button::new("Servers")
+                        .selected(!self.friends_open)
+                        .min_size(Vec2::new(width, 34.0)),
+                )
+                .clicked()
+                && self.friends_open
+            {
+                self.friends_open = false;
+                self.text_open = true;
+                if let Some(guild) = self
+                    .last_server
+                    .or_else(|| state.guilds.first().map(|g| g.id))
+                {
+                    self.last_server = Some(guild);
+                    self.pending_chat_restore = self.last_server_chat;
+                    self.send(Command::SelectGuild(guild));
+                }
+            }
+        });
+        ui.add_space(10.0);
         egui::ScrollArea::vertical()
-            .id_salt("servers")
-            .max_height(guild_height)
+            .id_salt("sidebar_list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if state.guilds.is_empty() {
-                    ui.label(
-                        RichText::new(if state.account.is_some() {
-                            "No servers available"
-                        } else {
-                            "Connect your account to see servers"
-                        })
-                        .size(13.0)
-                        .color(theme::SECONDARY),
-                    );
-                }
-                for guild in &state.guilds {
-                    let selected = state.selected_guild == Some(guild.id);
-                    if ui
-                        .add_enabled(
-                            !state.chat_sending,
-                            egui::Button::new(&guild.name)
-                                .truncate()
-                                .selected(selected)
-                                .min_size(Vec2::new(ui.available_width(), 35.0)),
-                        )
-                        .on_hover_text(&guild.name)
-                        .clicked()
-                    {
-                        self.browsing_channel = None;
-                        self.send(Command::SelectGuild(guild.id));
+                if self.friends_open {
+                    if state.social_busy {
+                        ui.label(RichText::new("Loading…").color(theme::SECONDARY));
                     }
-                }
-            });
-        ui.add_space(15.0);
-        ui.separator();
-        ui.add_space(12.0);
-        section_label(
-            ui,
-            if self.text_open {
-                "TEXT CHANNELS"
-            } else {
-                "VOICE CHANNELS"
-            },
-        );
-        ui.add_space(8.0);
-        if self.text_open {
-            egui::ScrollArea::vertical()
-                .id_salt("text_channels")
-                .show(ui, |ui| {
-                    for channel in &state.text_channels {
+                    if !state.social_status.is_empty() {
+                        ui.label(
+                            RichText::new(&state.social_status)
+                                .size(12.0)
+                                .color(theme::SECONDARY),
+                        );
+                    }
+                    for friend in &state.friends {
+                        let dm = state
+                            .direct_channels
+                            .iter()
+                            .find(|d| d.recipients.len() == 1 && d.recipients[0].id == friend.id);
+                        let selected = dm.is_some_and(|d| state.selected_dm == Some(d.id));
+                        if ui
+                            .add_enabled(
+                                !state.chat_sending && !state.social_busy,
+                                egui::Button::new(&friend.name)
+                                    .truncate()
+                                    .selected(selected)
+                                    .min_size(Vec2::new(ui.available_width(), 36.0)),
+                            )
+                            .on_hover_text(&friend.name)
+                            .clicked()
+                        {
+                            self.text_open = true;
+                            if let Some(dm) = dm {
+                                self.last_dm = Some(dm.id);
+                                self.send(Command::SelectDm(dm.id));
+                            } else {
+                                self.send(Command::OpenDm(friend.id));
+                            }
+                        }
+                    }
+                    let other: Vec<_> = state
+                        .direct_channels
+                        .iter()
+                        .filter(|d| {
+                            d.recipients.len() != 1
+                                || !state.friends.iter().any(|f| f.id == d.recipients[0].id)
+                        })
+                        .collect();
+                    if !other.is_empty() {
+                        ui.add_space(12.0);
+                        section_label(ui, "CONVERSATIONS");
+                        ui.add_space(6.0);
+                    }
+                    for dm in other {
                         if ui
                             .add_enabled(
                                 !state.chat_sending,
-                                egui::Button::new(format!("# {}", channel.name))
+                                egui::Button::new(&dm.name)
                                     .truncate()
-                                    .selected(state.selected_text_channel == Some(channel.id))
-                                    .min_size(Vec2::new(ui.available_width(), 34.0)),
+                                    .selected(state.selected_dm == Some(dm.id))
+                                    .min_size(Vec2::new(ui.available_width(), 36.0)),
                             )
-                            .on_hover_text(&channel.name)
+                            .on_hover_text(&dm.name)
                             .clicked()
                         {
-                            self.send(Command::SelectTextChannel(channel.id));
+                            self.text_open = true;
+                            self.last_dm = Some(dm.id);
+                            self.send(Command::SelectDm(dm.id));
                         }
                     }
-                    if state.text_channels.is_empty() {
-                        ui.label("Choose a server to see text channels.");
-                    }
-                });
-            return;
-        }
-        egui::ScrollArea::vertical()
-            .id_salt("voice_channels")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut count = 0;
-                for channel in &state.channels {
-                    if Some(channel.guild_id) != state.selected_guild {
-                        continue;
-                    }
-                    count += 1;
-                    let selected =
-                        self.browsing_channel.or(state.selected_channel) == Some(channel.id);
-                    let active = state.selected_channel == Some(channel.id)
-                        && has_voice_session(state.phase);
-                    let text = if active {
-                        format!("•  {}", channel.name)
-                    } else {
-                        format!("   {}", channel.name)
-                    };
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 34.0],
-                            egui::Button::new(text).truncate().selected(selected),
-                        )
-                        .on_hover_text(format!("{} · select channel", channel.name))
-                        .clicked()
+                    if state.friends.is_empty()
+                        && state.direct_channels.is_empty()
+                        && !state.social_busy
+                        && state.social_status.is_empty()
                     {
-                        self.browsing_channel = Some(channel.id);
+                        ui.label("No friends or conversations.");
                     }
-                }
-                if count == 0 {
-                    ui.label(
-                        RichText::new(if state.selected_guild.is_some() {
-                            "No voice channels found"
-                        } else {
-                            "Choose a server"
-                        })
-                        .size(13.0)
-                        .color(theme::SECONDARY),
-                    );
+                } else {
+                    for guild in &state.guilds {
+                        ui.push_id(guild.id, |ui| {
+                            let selected = state.selected_guild == Some(guild.id);
+                            if ui
+                                .add_enabled(
+                                    !state.chat_sending,
+                                    egui::Button::new(&guild.name)
+                                        .truncate()
+                                        .selected(selected)
+                                        .min_size(Vec2::new(ui.available_width(), 36.0)),
+                                )
+                                .on_hover_text(&guild.name)
+                                .clicked()
+                            {
+                                self.last_server = Some(guild.id);
+                                self.last_server_chat = None;
+                                self.pending_chat_restore = None;
+                                self.browsing_channel = None;
+                                self.text_open = true;
+                                self.send(Command::SelectGuild(guild.id));
+                            }
+                            if selected {
+                                ui.indent("channels", |ui| {
+                                    for channel in &state.text_channels {
+                                        if ui
+                                            .add_enabled(
+                                                !state.chat_sending,
+                                                egui::Button::new(format!("# {}", channel.name))
+                                                    .truncate()
+                                                    .selected(
+                                                        self.text_open
+                                                            && state.selected_text_channel
+                                                                == Some(channel.id),
+                                                    )
+                                                    .min_size(Vec2::new(
+                                                        ui.available_width(),
+                                                        32.0,
+                                                    )),
+                                            )
+                                            .on_hover_text(&channel.name)
+                                            .clicked()
+                                        {
+                                            self.text_open = true;
+                                            self.browsing_channel = None;
+                                            self.last_server_chat = Some(channel.id);
+                                            self.send(Command::SelectTextChannel(channel.id));
+                                        }
+                                    }
+                                    for channel in
+                                        state.channels.iter().filter(|c| c.guild_id == guild.id)
+                                    {
+                                        let active = state.selected_channel == Some(channel.id)
+                                            && state.selected_call_guild == Some(guild.id)
+                                            && has_voice_session(state.phase);
+                                        let label = if active {
+                                            format!("● {}", channel.name)
+                                        } else {
+                                            format!("Join · {}", channel.name)
+                                        };
+                                        let enabled = active
+                                            || !matches!(
+                                                state.phase,
+                                                Phase::Connecting
+                                                    | Phase::Joining
+                                                    | Phase::Reconnecting
+                                            );
+                                        if ui
+                                            .add_enabled(
+                                                enabled,
+                                                egui::Button::new(label)
+                                                    .truncate()
+                                                    .selected(
+                                                        !self.text_open
+                                                            && self.browsing_channel
+                                                                == Some(channel.id),
+                                                    )
+                                                    .min_size(Vec2::new(
+                                                        ui.available_width(),
+                                                        32.0,
+                                                    )),
+                                            )
+                                            .on_hover_text(if active {
+                                                format!("{} · connected", channel.name)
+                                            } else {
+                                                format!("Join {}", channel.name)
+                                            })
+                                            .clicked()
+                                        {
+                                            self.text_open = false;
+                                            self.browsing_channel = Some(channel.id);
+                                            if !active {
+                                                self.call_label =
+                                                    format!("{} / {}", guild.name, channel.name);
+                                                self.release_ptt();
+                                                self.local_error = None;
+                                                self.send(Command::Join {
+                                                    guild_id: guild.id,
+                                                    channel_id: channel.id,
+                                                });
+                                            }
+                                        }
+                                    }
+                                });
+                                ui.add_space(8.0);
+                            }
+                        });
+                    }
+                    if state.guilds.is_empty() {
+                        ui.label("No servers available.");
+                    }
                 }
             });
     }
@@ -610,185 +741,75 @@ impl VoiceApp {
     }
 
     fn call_panel(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        let selected = self.browsing_channel.or(state.selected_channel);
-        let channel = selected.and_then(|id| state.channels.iter().find(|c| c.id == id));
         ui.add_space(7.0);
-        let Some(channel) = channel else {
-            ui.add_space(32.0);
-            waveform(ui, theme::SECONDARY, Vec2::new(54.0, 48.0));
-            ui.add_space(16.0);
-            let ongoing = has_voice_session(state.phase);
-            ui.label(
-                RichText::new(if ongoing {
-                    "Your voice session"
-                } else {
-                    "Find your voice channel"
-                })
-                .size(25.0)
-                .strong(),
-            );
-            ui.add_space(9.0);
-            ui.label(RichText::new(if ongoing {
-                "Browsing servers does not leave your current call. Select a channel to switch, or use Leave below."
-            } else {
-                "Choose a server and channel on the left, then join when you’re ready."
-            }).color(theme::SECONDARY));
-            ui.add_space(15.0);
-            if ongoing {
-                status_badge(ui, state.phase);
-            } else {
-                ui.label(
-                    RichText::new("Microphone off · no active voice session")
-                        .size(12.0)
-                        .color(theme::SECONDARY),
-                );
-            }
-            return;
-        };
-        let active = state.selected_channel == Some(channel.id) && has_voice_session(state.phase);
-        let joining = active && matches!(state.phase, Phase::Joining | Phase::Reconnecting);
-        let guild_name = state
-            .guilds
-            .iter()
-            .find(|g| g.id == channel.guild_id)
-            .map(|g| g.name.as_str())
-            .unwrap_or("Server");
-        ui.label(RichText::new(guild_name).size(13.0).color(theme::SECONDARY));
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(&channel.name).font(fastframe_fonts::Weight::SemiBold.font_id(27.0)),
-        );
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if active {
-                status_badge(ui, state.phase);
-                ui.add_space(12.0);
-                if ui.button("Leave channel").clicked() {
-                    self.release_ptt();
-                    self.send(Command::Leave);
-                }
-            } else {
-                let can_join = state.account.is_some()
-                    && !matches!(
-                        state.phase,
-                        Phase::Connecting | Phase::Joining | Phase::Reconnecting
-                    );
-                let switching = has_voice_session(state.phase);
-                if primary_button(
-                    ui,
-                    if switching {
-                        "Switch to this channel"
-                    } else {
-                        "Join voice"
-                    },
-                    can_join,
-                )
-                .clicked()
-                {
-                    self.local_error = None;
-                    self.release_ptt();
-                    self.send(Command::Join {
-                        guild_id: channel.guild_id,
-                        channel_id: channel.id,
-                    });
-                }
-                if switching {
-                    ui.label(
-                        RichText::new("Leaves your current call")
-                            .size(12.0)
-                            .color(theme::SECONDARY),
-                    );
-                }
-            }
-        });
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(10.0);
-        if active && !joining {
-            section_label(
-                ui,
-                &format!("IN THIS CALL  ·  {}", state.participants.len()),
-            );
-            ui.add_space(11.0);
-            egui::ScrollArea::vertical()
-                .id_salt("participants")
-                .show(ui, |ui| {
-                    if state.participants.is_empty() {
-                        ui.label(
-                            RichText::new("Waiting for participant information…")
-                                .color(theme::SECONDARY),
-                        );
-                    }
-                    for person in &state.participants {
-                        ui.push_id(person.id, |ui| {
-                            egui::Frame::new()
-                                .fill(if person.speaking {
-                                    theme::SPEAKING_BG
-                                } else {
-                                    theme::SURFACE
-                                })
-                                .corner_radius(8)
-                                .inner_margin(egui::Margin::symmetric(13, 10))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        avatar(ui, &person.name, person.speaking);
-                                        ui.add_space(8.0);
-                                        ui.label(RichText::new(&person.name).strong());
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                let (label, color) = if person.deafened {
-                                                    ("Deafened", theme::SECONDARY)
-                                                } else if person.muted {
-                                                    ("Muted", theme::SECONDARY)
-                                                } else if person.speaking {
-                                                    ("Speaking", theme::SUCCESS)
-                                                } else {
-                                                    ("Listening", theme::SECONDARY)
-                                                };
-                                                ui.label(
-                                                    RichText::new(label).size(12.0).color(color),
-                                                );
-                                            },
-                                        );
-                                    });
-                                });
-                            ui.add_space(6.0);
-                        });
-                    }
-                });
+        ui.heading(if self.call_label.is_empty() {
+            "Voice"
         } else {
-            ui.add_space(21.0);
-            waveform(
-                ui,
-                if joining {
-                    theme::WARNING
-                } else {
-                    theme::SECONDARY
-                },
-                Vec2::new(48.0, 38.0),
-            );
-            ui.add_space(15.0);
+            &self.call_label
+        });
+        status_badge(ui, state.phase);
+        ui.add_space(16.0);
+        if state.phase != Phase::VoiceReady {
             ui.label(
-                RichText::new(if joining {
-                    "Setting up the encrypted voice connection"
+                RichText::new(if has_voice_session(state.phase) {
+                    "Connecting encrypted voice…"
                 } else {
-                    "Ready when you are"
-                })
-                .size(18.0)
-                .strong(),
-            );
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(if joining {
-                    "The call is ready only after voice transport and encryption are established."
-                } else {
-                    if state.muted || state.deafened { "Join to see who’s here. Your microphone is muted." } else if state.ptt_enabled { "Join to see who’s here. Hold the push-to-talk shortcut or button to transmit." } else { "Your microphone is enabled. Joining opens it and can transmit immediately." }
+                    "Choose a voice channel on the left to join."
                 })
                 .color(theme::SECONDARY),
             );
+            return;
         }
+        egui::ScrollArea::vertical()
+            .id_salt("participants")
+            .show(ui, |ui| {
+                if state.participants.is_empty() {
+                    ui.label(RichText::new("Waiting for participants…").color(theme::SECONDARY));
+                }
+                for person in &state.participants {
+                    ui.push_id(person.id, |ui| {
+                        egui::Frame::new()
+                            .fill(if person.speaking {
+                                theme::SPEAKING_BG
+                            } else {
+                                theme::SURFACE
+                            })
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::symmetric(13, 10))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    avatar(ui, &person.name, person.speaking);
+                                    ui.add_space(8.0);
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&person.name).strong())
+                                            .truncate(),
+                                    )
+                                    .on_hover_text(&person.name);
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        let label = if person.deafened {
+                                            "Deafened"
+                                        } else if person.muted {
+                                            "Muted"
+                                        } else if person.speaking {
+                                            "Speaking"
+                                        } else {
+                                            "Listening"
+                                        };
+                                        ui.label(RichText::new(label).size(12.0).color(
+                                            if person.speaking {
+                                                theme::SUCCESS
+                                            } else {
+                                                theme::SECONDARY
+                                            },
+                                        ));
+                                    });
+                                });
+                            });
+                        ui.add_space(6.0);
+                    });
+                }
+            });
     }
 
     fn sync_text_draft(&mut self, ctx: &egui::Context, state: &UiState) {
@@ -806,42 +827,92 @@ impl VoiceApp {
     }
 
     fn text_panel(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        let Some(channel) = state
-            .text_channels
+        let selected = state.selected_text_channel;
+        let dm = state
+            .direct_channels
             .iter()
-            .find(|c| Some(c.id) == state.selected_text_channel)
-        else {
-            ui.heading("Choose a text channel");
-            ui.label("Choose a channel on the left to read or send messages.");
+            .find(|d| Some(d.id) == state.selected_dm);
+        let guild_channel = state.text_channels.iter().find(|c| Some(c.id) == selected);
+        let Some(channel_id) = selected.filter(|_| dm.is_some() || guild_channel.is_some()) else {
+            ui.add_space(28.0);
+            ui.heading(if self.friends_open {
+                "Friends"
+            } else {
+                "Your servers"
+            });
+            ui.label(
+                RichText::new(if self.friends_open {
+                    "Choose a friend to chat or call."
+                } else {
+                    "Choose a channel on the left."
+                })
+                .color(theme::SECONDARY),
+            );
+            if !state.chat_status.is_empty()
+                && state.chat_status != "Choose a text channel to read its latest 50 messages."
+            {
+                ui.label(RichText::new(&state.chat_status).color(theme::DANGER));
+            }
             return;
         };
+        let name = dm
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| format!("# {}", guild_channel.unwrap().name));
         ui.horizontal(|ui| {
-            ui.add_sized(
-                [(ui.available_width() - 90.0).max(80.0), 30.0],
-                egui::Label::new(RichText::new(format!("# {}", channel.name)).heading()).truncate(),
-            )
-            .on_hover_text(&channel.name);
-            if ui
-                .add_enabled(!state.chat_busy, egui::Button::new("Refresh"))
-                .clicked()
-            {
-                self.send(Command::RefreshMessages);
-            }
+            ui.add(egui::Label::new(RichText::new(&name).heading()).truncate())
+                .on_hover_text(&name);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add_enabled(!state.chat_busy, egui::Button::new("Refresh").small())
+                    .on_hover_text("Refresh messages")
+                    .clicked()
+                {
+                    self.send(Command::RefreshMessages);
+                }
+                if dm.is_some_and(|d| d.recipients.len() == 1) {
+                    let active = state.selected_call_dm == Some(channel_id)
+                        && has_voice_session(state.phase);
+                    if active {
+                        if ui.button("End call").clicked() {
+                            self.release_ptt();
+                            self.send(Command::Leave);
+                        }
+                    } else if ui
+                        .add_enabled(
+                            !matches!(
+                                state.phase,
+                                Phase::Connecting | Phase::Joining | Phase::Reconnecting
+                            ),
+                            egui::Button::new("Call"),
+                        )
+                        .clicked()
+                    {
+                        self.call_label = name.clone();
+                        self.release_ptt();
+                        self.send(Command::CallDm(channel_id));
+                    }
+                }
+            });
         });
-        ui.label(
-            RichText::new(&state.chat_status)
-                .size(12.0)
-                .color(theme::SECONDARY),
-        );
-        ui.add_space(8.0);
+        ui.separator();
+        if state.chat_busy {
+            ui.label(RichText::new("Loading messages…").color(theme::SECONDARY));
+        } else if !state.chat_status.is_empty()
+            && state.chat_status != "Latest 50 messages · Refresh to check for updates."
+            && state.chat_status != "Message sent."
+        {
+            ui.label(RichText::new(&state.chat_status).color(theme::DANGER));
+        }
         egui::ScrollArea::vertical()
-            .id_salt(("messages", channel.id))
-            .max_height((ui.available_height() - 160.0).max(60.0))
+            .id_salt(("messages", channel_id))
+            .max_height((ui.available_height() - 108.0).max(60.0))
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 for message in &state.messages {
-                    ui.label(RichText::new(&message.author_name).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&message.author_name).strong());
+                    });
                     ui.add(
                         egui::Label::new(if message.content.is_empty() {
                             "[No plain text]"
@@ -851,19 +922,19 @@ impl VoiceApp {
                         .wrap()
                         .selectable(true),
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(12.0);
                 }
                 if state.messages.is_empty() && !state.chat_busy {
-                    ui.label("No messages in this snapshot.");
+                    ui.label(RichText::new("No messages yet.").color(theme::SECONDARY));
                 }
             });
         ui.separator();
-        ui.label(format!("Message to # {}", channel.name));
         ui.add_enabled(
             !state.chat_sending,
             egui::TextEdit::multiline(&mut self.message_draft)
                 .id(egui::Id::new(MESSAGE_EDIT_ID))
                 .char_limit(crate::messaging::MAX_MESSAGE_CHARS)
+                .hint_text(format!("Message {name}"))
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
         );
@@ -881,149 +952,93 @@ impl VoiceApp {
             .clicked()
             {
                 self.send(Command::SendMessage {
-                    channel_id: channel.id,
+                    channel_id,
                     content: self.message_draft.clone(),
                 });
             }
-            ui.label(format!("{}/2000", self.message_draft.chars().count()));
+            if self.message_draft.chars().count() > 1800 {
+                ui.label(format!("{}/2000", self.message_draft.chars().count()));
+            }
         });
-        ui.label(
-            RichText::new(
-                "Plain text · mentions and link embeds suppressed · no automatic send retries",
-            )
-            .size(12.0)
-            .color(theme::SECONDARY),
-        );
     }
 
     fn controls(&mut self, ui: &mut egui::Ui, state: &UiState) {
         ui.horizontal_wrapped(|ui| {
-            if let Some(account) = &state.account {
-                avatar(ui, &account.name, false);
-                ui.vertical(|ui| {
-                    ui.set_max_width(160.0);
-                    ui.add(egui::Label::new(RichText::new(&account.name).strong()).truncate())
-                        .on_hover_text(&account.name);
-                    ui.label(
-                        RichText::new(if state.muted {
-                            "Microphone muted"
-                        } else if state.ptt_enabled {
-                            "Push to talk"
-                        } else {
-                            "Microphone enabled"
-                        })
-                        .size(11.0)
-                        .color(if state.muted {
-                            theme::SECONDARY
-                        } else {
-                            theme::SUCCESS
-                        }),
-                    );
-                });
-            } else {
-                ui.label(RichText::new("Not connected").color(theme::SECONDARY));
-            }
+            let active = has_voice_session(state.phase);
+            ui.vertical(|ui| {
+                ui.set_max_width(240.0);
+                let label = if active && !self.call_label.is_empty() {
+                    self.call_label.as_str()
+                } else {
+                    state
+                        .account
+                        .as_ref()
+                        .map(|a| a.name.as_str())
+                        .unwrap_or("Disconnected")
+                };
+                ui.add(egui::Label::new(RichText::new(label).strong()).truncate())
+                    .on_hover_text(label);
+                ui.label(
+                    RichText::new(if active {
+                        phase_label(state.phase)
+                    } else {
+                        "No active call"
+                    })
+                    .size(11.0)
+                    .color(theme::SECONDARY),
+                );
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add_enabled(
-                        has_voice_session(state.phase),
-                        egui::Button::new(RichText::new("Leave").color(theme::DANGER)),
-                    )
-                    .clicked()
+                if active
+                    && ui
+                        .button(RichText::new("Disconnect").color(theme::DANGER))
+                        .clicked()
                 {
                     self.release_ptt();
                     self.send(Command::Leave);
                 }
                 if ui
-                    .add_enabled(
-                        state.account.is_some(),
+                    .add(
                         egui::Button::new(if state.deafened { "Undeafen" } else { "Deafen" })
                             .selected(state.deafened),
                     )
-                    .on_hover_text("Deafen silences playback and blocks microphone transmission")
+                    .on_hover_text("Silence playback and microphone")
                     .clicked()
                 {
                     self.send(Command::SetDeafened(!state.deafened));
                 }
                 if ui
                     .add_enabled(
-                        state.account.is_some() && !state.deafened,
+                        !state.deafened,
                         egui::Button::new(if state.muted { "Unmute" } else { "Mute" })
                             .selected(state.muted),
                     )
-                    .on_hover_text("Mute prevents your microphone audio from being transmitted")
+                    .on_hover_text("Microphone")
                     .clicked()
                 {
                     self.send(Command::SetMuted(!state.muted));
                 }
-                let mut ptt = state.ptt_enabled;
-                if ui
-                    .add_enabled(
-                        state.account.is_some(),
-                        egui::Checkbox::new(&mut ptt, "Push to talk"),
-                    )
-                    .changed()
-                {
-                    self.release_ptt();
-                    self.send(Command::SetPtt(ptt));
-                }
-            });
-        });
-        ui.add_space(9.0);
-        ui.horizontal_wrapped(|ui| {
-            if state.ptt_enabled {
-                let talk = ui.add_enabled(
-                    state.phase == Phase::VoiceReady && !state.muted && !state.deafened,
-                    egui::Button::new("Hold to talk"),
-                );
-                self.ptt.local_pressed(
-                    (talk.is_pointer_button_down_on()
-                        || (talk.has_focus()
-                            && ui.input(|i| {
-                                i.key_down(egui::Key::Space) || i.key_down(egui::Key::Enter)
-                            })))
-                        && ui.input(|i| i.focused),
-                );
-            } else {
-                self.ptt.local_pressed(false);
-            }
-            ui.label(RichText::new("Input").size(11.0).color(theme::SECONDARY));
-            meter(
-                ui,
-                state.input_level,
-                state.phase == Phase::VoiceReady && !state.muted && !state.deafened,
-            );
-            ui.add_space(15.0);
-            ui.label(RichText::new("Output").size(11.0).color(theme::SECONDARY));
-            let mut volume = state.output_volume;
-            if ui
-                .add(egui::Slider::new(&mut volume, 0.0..=2.0).show_value(false))
-                .on_hover_text(format!("Output volume: {:.0}%", volume * 100.0))
-                .changed()
-            {
-                self.send(Command::SetOutputVolume(volume));
-            }
-            ui.label(
-                RichText::new(format!("{:.0}%", volume * 100.0))
-                    .size(11.0)
-                    .color(theme::SECONDARY),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if state.ptt_enabled {
-                    ui.label(
-                        RichText::new(if self.ptt.available() {
-                            "PTT: Ctrl + Shift + Space"
-                        } else {
-                            "PTT: hold the Talk button"
-                        })
-                        .size(11.0)
-                        .color(theme::SECONDARY),
+                    let talk = ui.add_enabled(
+                        state.phase == Phase::VoiceReady && !state.muted && !state.deafened,
+                        egui::Button::new("Hold to talk"),
+                    );
+                    self.ptt.local_pressed(
+                        (talk.is_pointer_button_down_on()
+                            || (talk.has_focus()
+                                && ui.input(|i| {
+                                    i.key_down(egui::Key::Space) || i.key_down(egui::Key::Enter)
+                                })))
+                            && ui.input(|i| i.focused),
                     );
                 } else {
-                    ui.label(
-                        RichText::new("Headphones recommended")
-                            .size(11.0)
-                            .color(theme::SECONDARY),
+                    self.ptt.local_pressed(false);
+                }
+                if active {
+                    meter(
+                        ui,
+                        state.input_level,
+                        state.phase == Phase::VoiceReady && !state.muted && !state.deafened,
                     );
                 }
             });
@@ -1068,21 +1083,24 @@ impl VoiceApp {
                 ui.add_space(10.0);
                 ui.label(RichText::new("Device changes apply to your next Join. Leave and rejoin to switch an active call. System default uses your operating system’s selected device.").size(12.0).color(theme::SECONDARY));
                 ui.add_space(12.0);
-                ui.add_space(15.0);
-                ui.separator();
-                ui.add_space(12.0);
-                ui.label(RichText::new("Voice & privacy").size(16.0).strong());
-                ui.add_space(8.0);
-                ui.label("Use headphones. This client has no acoustic echo cancellation.");
-                ui.add_space(7.0);
-                ui.label(self.ptt.status());
-                ui.add_space(7.0);
-                ui.label("Losing focus releases an in-window press. No audio is recorded or saved.");
-                ui.add_space(7.0);
-                ui.label(if self.tray.as_ref().is_some_and(Tray::is_shown) {
-                    "Closing the window keeps calls running in the tray. Choose Quit to disconnect and stop."
-                } else {
-                    "No usable system tray was found. Closing the window disconnects and quits."
+                let mut ptt = state.ptt_enabled;
+                if ui.checkbox(&mut ptt, "Push-to-talk").changed() {
+                    self.release_ptt();
+                    self.send(Command::SetPtt(ptt));
+                }
+                if ptt || !self.ptt.available() { ui.label(RichText::new(self.ptt.status()).size(12.0).color(theme::SECONDARY)); }
+                let mut volume = state.output_volume;
+                if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0).text("Output volume")).changed() {
+                    self.send(Command::SetOutputVolume(volume));
+                }
+                ui.collapsing("Advanced & privacy", |ui| {
+                    ui.label("Use headphones. Echo cancellation is not available.");
+                    ui.label("Losing focus releases an in-window press. Audio is not recorded or saved.");
+                    ui.label(if self.tray.as_ref().is_some_and(Tray::is_shown) {
+                        "Closing the window keeps calls running in the tray. Quit ends the call."
+                    } else {
+                        "Closing the window disconnects and quits."
+                    });
                 });
                 ui.add_space(15.0);
                 ui.separator();
@@ -1112,6 +1130,29 @@ impl VoiceApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let state = self.snapshot();
         let ctx = ui.ctx().clone();
+        if state.account.is_some() && !self.home_requested {
+            self.home_requested = true;
+            self.send(Command::SelectHome);
+        }
+        if self.friends_open
+            && let Some(dm) = state.selected_dm
+        {
+            self.last_dm = Some(dm);
+        }
+        if self.friends_open
+            && !state.social_busy
+            && state.selected_guild.is_none()
+            && let Some(dm) = self.pending_dm_restore.take()
+            && state.direct_channels.iter().any(|d| d.id == dm)
+        {
+            self.send(Command::SelectDm(dm));
+        }
+        if let Some(channel) = self.pending_chat_restore
+            && state.text_channels.iter().any(|c| c.id == channel)
+        {
+            self.pending_chat_restore = None;
+            self.send(Command::SelectTextChannel(channel));
+        }
         self.sync_text_draft(&ctx, &state);
         egui::Panel::top("header")
             .resizable(false)
@@ -1132,7 +1173,7 @@ impl VoiceApp {
                 )
                 .show(ui, |ui| self.controls(ui, &state));
             egui::Panel::left("navigation")
-                .exact_size(208.0)
+                .exact_size((ctx.content_rect().width() * 0.32).clamp(180.0, 240.0))
                 .resizable(false)
                 .frame(
                     egui::Frame::new()
@@ -1164,15 +1205,10 @@ impl VoiceApp {
                 }
                 if state.account.is_some() && state.phase == Phase::Failed {
                     ui.horizontal(|ui| {
-                        if primary_button(ui, "Reconnect account", true).clicked() {
+                        if primary_button(ui, "Reconnect", true).clicked() {
                             self.release_ptt();
                             self.send(Command::Reconnect);
                         }
-                        ui.label(
-                            RichText::new("Then choose Join to return to voice.")
-                                .size(12.0)
-                                .color(theme::SECONDARY),
-                        );
                     });
                     ui.add_space(12.0);
                 }
