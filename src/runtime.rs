@@ -343,7 +343,6 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.account = None;
                             s.profiles.clear();
                             s.current_call = None;
-                            s.call_events.clear();
                             s.friends.clear();
                             s.direct_channels.clear();
                             s.social_status.clear();
@@ -975,11 +974,12 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     if id == generation && snapshot(&state).account.is_some() =>
                 {
                     update(&state, &repaint, |s| {
-                        crate::calls::event(
-                            s,
-                            channel,
-                            "Remote ring cancellation was not confirmed",
-                        )
+                        if s.current_call
+                            .as_ref()
+                            .is_some_and(|call| call.channel == channel)
+                        {
+                            s.status = "Remote ring cancellation was not confirmed".into();
+                        }
                     });
                 }
                 Some(ResultEvent::Ring(id, result)) if id == join_generation => {
@@ -1056,12 +1056,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                     message.id,
                                 );
                                 crate::social::sort_by_activity(&mut s.friends, &s.direct_channels);
-                                s.messages.retain(|m| m.id != message.id);
-                                s.messages.push(message);
-                                s.messages.sort_by_key(|m| m.id);
-                                if s.messages.len() > crate::messaging::MAX_HISTORY {
-                                    s.messages.remove(0);
-                                }
+                                crate::messaging::insert_message(&mut s.messages, message);
                                 s.sent_revision = s.sent_revision.wrapping_add(1);
                                 s.chat_status = "Message sent.".into();
                             }
@@ -1291,7 +1286,6 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.guilds.clear();
                             s.channels.clear();
                             s.current_call = None;
-                            s.call_events.clear();
                             s.login_storage_status = if removed {
                                 "Discord rejected this login. Sign in again; no automatic retry."
                                     .into()
@@ -1414,12 +1408,22 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             && let Ok(message) = crate::messaging::parse_message(&data, channel)
                         {
                             update(&state, &repaint, |s| {
-                                s.messages.retain(|m| m.id != message.id);
-                                s.messages.push(message);
-                                s.messages.sort_by_key(|m| m.id);
-                                if s.messages.len() > crate::messaging::MAX_HISTORY {
-                                    s.messages.remove(0);
-                                }
+                                crate::messaging::insert_message(&mut s.messages, message);
+                            });
+                        }
+                    }
+                    if kind == "MESSAGE_UPDATE" {
+                        let selected = snapshot(&state);
+                        if let Some(channel) = selected.selected_text_channel
+                            && chat_channel_allowed(&selected, channel)
+                            && account::snowflake(&data["channel_id"]) == Some(channel)
+                        {
+                            update(&state, &repaint, |s| {
+                                let _ = crate::messaging::update_message(
+                                    &mut s.messages,
+                                    &data,
+                                    channel,
+                                );
                             });
                         }
                     }
@@ -2688,6 +2692,8 @@ mod tests {
                 author_id: 2,
                 author_name: "Tester".into(),
                 content: "Private test text".into(),
+                message_type: 0,
+                call: None,
             }],
             chat_busy: true,
             muted: false,

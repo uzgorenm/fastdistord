@@ -63,7 +63,7 @@ impl Connection {
     ) -> Result<Connection> {
         let url = generate_url(&info.endpoint)?;
 
-        let mut client = WsStream::connect(url).await?;
+        let mut client = WsStream::connect(url, config.dave_handshake.clone()).await?;
         config.dave_handshake.record(crate::DaveStage::Connected, 0);
         let (ws_msg_tx, ws_msg_rx) = flume::unbounded();
 
@@ -288,19 +288,19 @@ impl Connection {
     #[instrument(skip(self))]
     pub async fn reconnect(&mut self, config: &Config) -> Result<()> {
         if let Some(t) = config.driver_timeout {
-            timeout(t.into(), self.reconnect_inner()).await?
+            timeout(t.into(), self.reconnect_inner(config)).await?
         } else {
-            self.reconnect_inner().await
+            self.reconnect_inner(config).await
         }
     }
 
     #[instrument(skip(self))]
-    pub async fn reconnect_inner(&mut self) -> Result<()> {
+    pub async fn reconnect_inner(&mut self, config: &Config) -> Result<()> {
         let url = generate_url(&self.info.endpoint)?;
 
         // Thread may have died, we want to send to prompt a clean exit
         // (if at all possible) and then proceed as normal.
-        let mut client = WsStream::connect(url).await?;
+        let mut client = WsStream::connect(url, config.dave_handshake.clone()).await?;
 
         client
             .send_json(&GatewayEvent::from(Resume {
@@ -401,7 +401,7 @@ async fn init_cipher(
 
                         config
                             .dave_handshake
-                            .record(crate::DaveStage::KeyPackage, 0);
+                            .record(crate::DaveStage::KeyPackage, 26);
                         Some(session)
                     } else {
                         None

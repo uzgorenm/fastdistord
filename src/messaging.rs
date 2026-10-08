@@ -21,6 +21,14 @@ pub struct ChatMessage {
     pub author_id: u64,
     pub author_name: String,
     pub content: String,
+    pub message_type: u16,
+    pub call: Option<CallMetadata>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallMetadata {
+    pub participants: Option<Vec<u64>>,
+    pub ended: bool,
+    pub ended_ms: Option<i128>,
 }
 
 pub(crate) fn validate_id(id: u64) -> Result<()> {
@@ -105,9 +113,163 @@ pub(crate) fn parse_message(value: &Value, channel_id: u64) -> Result<ChatMessag
         author_id,
         author_name: display_name(&value["author"]),
         content: content.to_owned(),
+        message_type: value["type"]
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+            .unwrap_or(0),
+        call: parse_call(value.get("call")),
     })
 }
 
+fn parse_call(value: Option<&Value>) -> Option<CallMetadata> {
+    let call = value?.as_object()?;
+    let participants = call
+        .get("participants")
+        .and_then(Value::as_array)
+        .filter(|v| v.len() <= 250)
+        .and_then(|v| v.iter().map(snowflake).collect::<Option<Vec<_>>>());
+
+    let ended_ms = call
+        .get("ended_timestamp")
+        .and_then(Value::as_str)
+        .filter(|s| s.len() <= 64)
+        .and_then(|s| {
+            time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+        })
+        .map(|t| t.unix_timestamp_nanos() / 1_000_000);
+    Some(CallMetadata {
+        participants,
+        ended: ended_ms.is_some(),
+        ended_ms,
+    })
+}
+pub(crate) fn system_label(message: &ChatMessage, own: Option<u64>) -> Option<String> {
+    let author = if own == Some(message.author_id) {
+        "You"
+    } else {
+        &message.author_name
+    };
+    Some(match message.message_type {
+        0 | 19 | 20 => return None,
+        3 => {
+            let call = message.call.as_ref();
+            let ended = call.is_some_and(|c| c.ended);
+            let missed = ended
+                && own.is_some_and(|id| {
+                    id != message.author_id
+                        && call
+                            .and_then(|c| c.participants.as_ref())
+                            .is_some_and(|p| !p.contains(&id))
+                });
+            let duration = call
+                .and_then(|c| c.ended_ms)
+                .and_then(|end| end.checked_sub(i128::from((message.id >> 22) + 1_420_070_400_000)))
+                .filter(|ms| *ms >= 0)
+                .map(|ms| ms / 1000);
+            let mut text = if missed {
+                format!("You missed a call from {author}")
+            } else {
+                format!("{author} started a call")
+            };
+            if ended {
+                if let Some(seconds) = duration {
+                    text.push_str(&format!(
+                        " that lasted {}:{:02}",
+                        seconds / 60,
+                        seconds % 60
+                    ));
+                } else {
+                    text.push_str(" · ended");
+                }
+            }
+            if let Some(participants) = call.and_then(|c| c.participants.as_ref()) {
+                text.push_str(&format!(" · {} participants", participants.len()));
+            }
+            text
+        }
+        1 => format!("{author} added a recipient"),
+        2 => format!("{author} removed a recipient"),
+        4 => {
+            if message.content.is_empty() {
+                format!("{author} removed the channel name")
+            } else {
+                format!("{author} changed the channel name: {}", message.content)
+            }
+        }
+        5 => format!("{author} changed the channel icon"),
+        6 => format!("{author} pinned a message"),
+        7 => format!("{author} joined the server"),
+        n => format!("Discord system message (type {n})"),
+    })
+}
+/// Channel-scoped partial updates replace the existing ID; missing metadata is preserved.
+pub(crate) fn update_message(
+    messages: &mut [ChatMessage],
+    value: &Value,
+    channel: u64,
+) -> Result<()> {
+    if snowflake(&value["channel_id"]) != Some(channel) {
+        bail!("Message update belongs to another channel");
+    }
+    let id = snowflake(&value["id"]).ok_or_else(|| anyhow::anyhow!("Invalid message update"))?;
+    let Some(existing) = messages.iter_mut().find(|m| m.id == id) else {
+        return Ok(());
+    };
+    let mut updated = existing.clone();
+    if let Some(content) = value.get("content") {
+        let content = content
+            .as_str()
+            .filter(|v| v.chars().count() <= MAX_RECEIVED_CHARS)
+            .ok_or_else(|| anyhow::anyhow!("Invalid message update content"))?;
+        updated.content = content.to_owned();
+    }
+    if let Some(kind) = value.get("type") {
+        updated.message_type = kind
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid message type"))?;
+    }
+    if let Some(author) = value.get("author")
+        && let Some(id) = snowflake(&author["id"])
+    {
+        updated.author_id = id;
+        updated.author_name = display_name(author);
+    }
+    if let Some(call) = value.get("call") {
+        if call.is_null() {
+            updated.call = None;
+        } else if let Some(new) = parse_call(Some(call)) {
+            let prior = updated.call.take();
+            updated.call = Some(CallMetadata {
+                participants: if call.get("participants").is_some() {
+                    new.participants
+                } else {
+                    prior.as_ref().and_then(|c| c.participants.clone())
+                },
+                ended: if call.get("ended_timestamp").is_some() {
+                    new.ended
+                } else {
+                    prior.as_ref().is_some_and(|c| c.ended)
+                },
+                ended_ms: if call.get("ended_timestamp").is_some() {
+                    new.ended_ms
+                } else {
+                    prior.and_then(|c| c.ended_ms)
+                },
+            });
+        }
+    }
+    *existing = updated;
+    Ok(())
+}
+pub(crate) fn insert_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
+    messages.retain(|m| m.id != message.id);
+    messages.push(message);
+    messages.sort_by_key(|m| m.id);
+    if messages.len() > MAX_HISTORY {
+        messages.remove(0);
+    }
+}
 pub(crate) fn parse_messages(value: &Value, channel_id: u64) -> Result<Vec<ChatMessage>> {
     validate_id(channel_id)?;
     let Some(messages) = value.as_array() else {
@@ -120,7 +282,8 @@ pub(crate) fn parse_messages(value: &Value, channel_id: u64) -> Result<Vec<ChatM
         .iter()
         .map(|message| parse_message(message, channel_id))
         .collect::<Result<_>>()?;
-    result.reverse(); // Discord returns newest first; the UI reads oldest first.
+    result.sort_by_key(|m| m.id);
+    result.dedup_by_key(|m| m.id);
     Ok(result)
 }
 
@@ -129,6 +292,89 @@ mod tests {
     use super::*;
     fn message(id: u64) -> Value {
         json!({"id":id.to_string(), "channel_id":"10", "author":{"id":"20", "username":"Tester"}, "content":"hello"})
+    }
+    #[test]
+    fn real_call_message_updates_in_place_and_history_create_deduplicates() {
+        let id = 1_000_000_000_000_000_000u64;
+        let value = json!({"id":id.to_string(),"channel_id":"10","author":{"id":"20","username":"Tester"},"type":3,"content":"","call":{"participants":["20","30"],"ended_timestamp":null}});
+        let mut messages = parse_messages(&json!([value.clone(), value.clone()]), 10).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            system_label(&messages[0], Some(20)).unwrap(),
+            "You started a call · 2 participants"
+        );
+        insert_message(&mut messages, parse_message(&value, 10).unwrap());
+        assert_eq!(messages.len(), 1);
+        let end = time::OffsetDateTime::from_unix_timestamp_nanos(
+            i128::from((id >> 22) + 1_420_070_400_000 + 62_000) * 1_000_000,
+        )
+        .unwrap()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+        update_message(
+            &mut messages,
+            &json!({"id":id.to_string(),"channel_id":"10","call":{"ended_timestamp":end}}),
+            10,
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(
+            system_label(&messages[0], Some(30))
+                .unwrap()
+                .contains("lasted 1:02")
+        );
+        assert!(
+            system_label(&messages[0], Some(40))
+                .unwrap()
+                .starts_with("You missed a call from Tester")
+        );
+        assert_eq!(
+            messages[0]
+                .call
+                .as_ref()
+                .unwrap()
+                .participants
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
+        let before = messages.clone();
+        assert!(
+            update_message(
+                &mut messages,
+                &json!({"id":id.to_string(),"channel_id":"11","content":"wrong scope"}),
+                10
+            )
+            .is_err()
+        );
+        assert_eq!(messages, before);
+        update_message(
+            &mut messages,
+            &json!({"id":"5","channel_id":"10","content":"unknown"}),
+            10,
+        )
+        .unwrap();
+        assert_eq!(messages, before);
+    }
+    #[test]
+    fn missing_or_invalid_call_metadata_never_invents_missed_or_duration() {
+        let mut value = message(1);
+        value["type"] = json!(3);
+        value["content"] = json!("");
+        let parsed = parse_message(&value, 10).unwrap();
+        assert_eq!(
+            system_label(&parsed, Some(30)).unwrap(),
+            "Tester started a call"
+        );
+        value["call"] = json!({"ended_timestamp":"malformed","participants":["invalid"]});
+        let label = system_label(&parse_message(&value, 10).unwrap(), Some(30)).unwrap();
+        assert!(!label.contains("missed") && !label.contains("lasted") && !label.contains("ended"));
+        value["type"] = json!(6);
+        assert_eq!(
+            system_label(&parse_message(&value, 10).unwrap(), None).unwrap(),
+            "Tester pinned a message"
+        );
     }
     #[test]
     fn send_preserves_unicode_and_never_enables_mentions_or_tts() {

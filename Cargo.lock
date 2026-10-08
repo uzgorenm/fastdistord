@@ -1543,6 +1543,7 @@ dependencies = [
  "sha2",
  "songbird",
  "symphonia-core",
+ "time",
  "tls_codec",
  "tokio",
  "tokio-tungstenite 0.26.2",

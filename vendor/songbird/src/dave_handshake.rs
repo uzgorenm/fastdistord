@@ -10,6 +10,18 @@ pub enum DaveStage {
     Identify,
     /// Session description negotiated a DAVE version.
     Protocol,
+    /// Binary frame received; value is a recognized opcode or zero.
+    BinaryReceived,
+    /// Binary frame byte length, capped at u16::MAX.
+    BinaryLength,
+    /// A recognized opcode appeared at the v8 sequenced header offset.
+    SequencedOpcode,
+    /// Binary event decoded successfully.
+    BinaryDecoded,
+    /// Binary decoding failed; value is a local error category.
+    BinaryDecodeFailed,
+    /// JSON event decoding failed; no payload retained.
+    JsonDecodeFailed,
     /// Key package sent (no package bytes retained).
     KeyPackage,
     /// External sender accepted.

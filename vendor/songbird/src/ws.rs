@@ -23,14 +23,20 @@ use tokio_tungstenite::{
 use tokio_websockets::{
     CloseCode, Error as TwsError, Limits, MaybeTlsStream, Message, WebSocketStream,
 };
-use tracing::{debug, instrument};
+use tracing::instrument;
 use url::Url;
 
-pub struct WsStream(WebSocketStream<MaybeTlsStream<TcpStream>>);
+pub struct WsStream(
+    WebSocketStream<MaybeTlsStream<TcpStream>>,
+    std::sync::Arc<crate::DaveHandshake>,
+);
 
 impl WsStream {
     #[instrument]
-    pub(crate) async fn connect(url: Url) -> Result<Self> {
+    pub(crate) async fn connect(
+        url: Url,
+        handshake: std::sync::Arc<crate::DaveHandshake>,
+    ) -> Result<Self> {
         #[cfg(feature = "tungstenite")]
         let (stream, _) = tokio_tungstenite::connect_async_with_config::<Url>(
             url,
@@ -50,7 +56,7 @@ impl WsStream {
             .connect()
             .await?;
 
-        Ok(Self(stream))
+        Ok(Self(stream, handshake))
     }
 
     pub(crate) async fn recv_event(&mut self) -> Result<Option<Event>> {
@@ -62,11 +68,11 @@ impl WsStream {
             Ok(None) | Err(_) => None,
         };
 
-        convert_ws_message(ws_message)
+        convert_ws_message(ws_message, &self.1)
     }
 
     pub(crate) async fn recv_event_no_timeout(&mut self) -> Result<Option<Event>> {
-        convert_ws_message(self.0.try_next().await?)
+        convert_ws_message(self.0.try_next().await?, &self.1)
     }
 
     pub(crate) async fn send_json(&mut self, value: &Event) -> Result<()> {
@@ -76,7 +82,10 @@ impl WsStream {
     }
 
     pub(crate) async fn send_binary(&mut self, value: &Event) -> Result<()> {
-        let res = serialize_binary_event(value);
+        let res = match value {
+            Event::DaveMlsKeyPackage(package) => Ok(crate::key_package_frame(&package.key_package)),
+            _ => serialize_binary_event(value),
+        };
         let res = res.map(Message::binary);
 
         Ok(res.map_err(Error::from).map(|m| self.0.send(m))?.await?)
@@ -132,25 +141,59 @@ impl From<BinaryError> for Error {
     }
 }
 
+fn decode_binary(
+    bytes: &[u8],
+    handshake: &crate::DaveHandshake,
+) -> std::result::Result<Event, BinaryError> {
+    let opcode = bytes
+        .first()
+        .copied()
+        .filter(|op| matches!(op, 25 | 27 | 29 | 30))
+        .unwrap_or(0);
+    handshake.record(crate::DaveStage::BinaryReceived, u16::from(opcode));
+    handshake.record(
+        crate::DaveStage::BinaryLength,
+        bytes.len().min(u16::MAX as usize) as u16,
+    );
+    if let Some(opcode) = bytes
+        .get(2)
+        .copied()
+        .filter(|op| opcode == 0 && matches!(op, 25 | 27 | 29 | 30))
+    {
+        handshake.record(crate::DaveStage::SequencedOpcode, u16::from(opcode));
+    }
+    let result = deserialize_binary_event(bytes);
+    match &result {
+        Ok(_) => handshake.record(crate::DaveStage::BinaryDecoded, u16::from(opcode)),
+        Err(error) => handshake.record(
+            crate::DaveStage::BinaryDecodeFailed,
+            match error {
+                BinaryError::InsufficientData => 1,
+                BinaryError::InvalidOpcode(_) => 2,
+                BinaryError::InvalidOperationType(_) => 3,
+                BinaryError::ParseError(_) => 4,
+            },
+        ),
+    }
+    result
+}
 #[inline]
-pub(crate) fn convert_ws_message(message: Option<Message>) -> Result<Option<Event>> {
+pub(crate) fn convert_ws_message(
+    message: Option<Message>,
+    handshake: &crate::DaveHandshake,
+) -> Result<Option<Event>> {
     #[cfg(feature = "tungstenite")]
     match message {
         Some(Message::Text(ref payload)) => {
             return Ok(serde_json::from_str(payload)
                 .map_err(|e| {
-                    debug!("Unexpected JSON: {e}. Payload: {payload}");
+                    handshake.record(crate::DaveStage::JsonDecodeFailed, 0);
                     e
                 })
                 .ok())
         }
         Some(Message::Binary(bytes)) => {
-            return Ok(deserialize_binary_event(&bytes)
-                .map_err(|e| {
-                    debug!("Unexpected binary: {e}");
-                    e
-                })
-                .ok());
+            return Ok(decode_binary(&bytes, handshake).ok());
         }
         Some(Message::Close(Some(frame))) => {
             return Err(Error::WsClosed(Some(frame)));
@@ -165,7 +208,7 @@ pub(crate) fn convert_ws_message(message: Option<Message>) -> Result<Option<Even
             return if let Some(text) = message.as_text() {
                 Ok(serde_json::from_str(text)
                     .map_err(|e| {
-                        debug!("Unexpected JSON: {e}. Payload: {text}");
+                        handshake.record(crate::DaveStage::JsonDecodeFailed, 0);
                         e
                     })
                     .ok())
@@ -174,12 +217,7 @@ pub(crate) fn convert_ws_message(message: Option<Message>) -> Result<Option<Even
             };
         }
         Some(message) if message.is_binary() => {
-            return Ok(deserialize_binary_event(&message.into_payload())
-                .map_err(|e| {
-                    debug!("Unexpected binary: {e}");
-                    e
-                })
-                .ok());
+            return Ok(decode_binary(&message.into_payload(), handshake).ok());
         }
         Some(message) if message.is_close() => {
             return Err(Error::WsClosed(message.as_close().map(|(c, _)| c)));

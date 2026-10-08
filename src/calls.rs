@@ -46,12 +46,6 @@ pub struct Call {
     pub active_since: Option<Instant>,
     pub elapsed: Duration,
 }
-#[derive(Clone, Debug)]
-pub struct Event {
-    pub channel: u64,
-    pub text: &'static str,
-    pub at: u64,
-}
 pub fn start(state: &mut UiState, channel: u64, private: bool, target: String) {
     end(state, "Call canceled");
     state.current_call = Some(Call {
@@ -68,18 +62,6 @@ pub fn start(state: &mut UiState, channel: u64, private: bool, target: String) {
     });
     cue(state, Cue::Connecting);
 }
-pub fn event(state: &mut UiState, channel: u64, text: &'static str) {
-    if state.call_events.len() == 32 {
-        state.call_events.remove(0);
-    }
-    state.call_events.push(Event {
-        channel,
-        text,
-        at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64),
-    });
-}
 pub fn server_call(state: &mut UiState, channel: u64, ringing: Option<bool>) {
     let own = state.account.as_ref().map(|a| a.id);
     let peer = state.participants.iter().any(|p| Some(p.id) != own);
@@ -89,8 +71,6 @@ pub fn server_call(state: &mut UiState, channel: u64, ringing: Option<bool>) {
     if !call.private || call.channel != channel {
         return;
     }
-    let first = !call.confirmed;
-    let answered = peer && !call.peer_joined;
     call.confirmed = true;
     call.peer_joined = peer;
     if let Some(ringing) = ringing {
@@ -99,26 +79,9 @@ pub fn server_call(state: &mut UiState, channel: u64, ringing: Option<bool>) {
     if peer {
         call.ringing = false;
     }
-    if first {
-        event(state, channel, "You started a call");
-    }
-    if answered {
-        event(state, channel, "Call answered");
-    }
 }
-pub fn end(state: &mut UiState, reason: &'static str) {
+pub fn end(state: &mut UiState, _reason: &'static str) {
     if let Some(call) = state.current_call.take() {
-        if call.private {
-            event(
-                state,
-                call.channel,
-                if call.confirmed {
-                    reason
-                } else {
-                    "Call canceled"
-                },
-            );
-        }
         cue(
             state,
             if call.active_since.is_some() {
@@ -241,20 +204,20 @@ mod tests {
         }
     }
     #[test]
-    fn real_call_events_scope_ring_answer_pending_active_and_end() {
+    fn observed_call_panel_scopes_ring_answer_pending_active_and_end() {
         let mut s = state();
         start(&mut s, 10, true, "Friend".into());
         refresh(&mut s);
-        assert!(s.call_events.is_empty());
+        assert!(!s.current_call.as_ref().unwrap().confirmed);
         server_call(&mut s, 11, Some(true));
-        assert!(s.call_events.is_empty());
+        assert!(!s.current_call.as_ref().unwrap().confirmed);
         s.phase = Phase::VoiceWaiting;
         s.participants = vec![person(1)];
         server_call(&mut s, 10, Some(true));
         refresh(&mut s);
         assert_eq!(s.current_call.as_ref().unwrap().stage, Stage::Ringing);
         assert_eq!(s.sound_cue, Cue::Ring);
-        assert_eq!(s.call_events[0].text, "You started a call");
+        assert!(s.current_call.as_ref().unwrap().confirmed);
         assert!(s.current_call.as_ref().unwrap().active_since.is_none());
         s.participants.push(person(2));
         server_call(&mut s, 10, None);
@@ -275,8 +238,7 @@ mod tests {
         s.selected_channel = None;
         refresh(&mut s);
         assert!(s.current_call.is_none());
-        assert_eq!(s.call_events.last().unwrap().text, "Call ended");
-        assert!(s.call_events.iter().all(|e| e.channel == 10));
+        assert!(s.messages.is_empty());
     }
     #[test]
     fn unmute_intent_is_pending_until_devices_and_encryption_are_ready() {

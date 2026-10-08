@@ -6,7 +6,7 @@
 mod images;
 mod sounds;
 use std::sync::{Arc, Mutex, mpsc::Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::{Align, Color32, FontId, Layout, RichText, Stroke, Vec2};
 use fastframe_shell::{Closed, Headless, Held, Resident, Shell, Waker};
@@ -95,6 +95,7 @@ struct VoiceApp {
     qr_login: Option<crate::qr_login::Login>,
     qr_code: Option<(qrcode::QrCode, std::time::Instant)>,
     qr_status: String,
+    qr_retry_until: Option<Instant>,
     settings_open: bool,
     selected_input: Option<String>,
     selected_output: Option<String>,
@@ -169,6 +170,7 @@ impl VoiceApp {
             qr_login: None,
             qr_code: None,
             qr_status: String::new(),
+            qr_retry_until: None,
             settings_open: false,
             selected_input: None,
             selected_output: None,
@@ -724,7 +726,9 @@ impl VoiceApp {
                         remember: self.remember,
                     });
                 }
-                crate::qr_login::Event::Failed(message) => {
+                crate::qr_login::Event::Failed(message, retry_after) => {
+                    self.qr_retry_until =
+                        retry_after.and_then(|delay| Instant::now().checked_add(delay));
                     self.qr_code = None;
                     self.qr_login = None;
                     self.qr_status = message;
@@ -765,7 +769,16 @@ impl VoiceApp {
                 self.qr_code = None;
                 self.qr_status = "Login canceled.".into();
             }
-        } else if primary_button(ui, "Connect with QR code", !connecting).clicked() {
+        } else if primary_button(
+            ui,
+            "Connect with QR code",
+            !connecting
+                && self
+                    .qr_retry_until
+                    .is_none_or(|until| Instant::now() >= until),
+        )
+        .clicked()
+        {
             self.token.zeroize();
             self.risk_accepted = true;
             self.qr_status = "Creating a fresh login code…".into();
@@ -778,6 +791,16 @@ impl VoiceApp {
         }
         if !self.qr_status.is_empty() {
             ui.label(&self.qr_status);
+        }
+        if let Some(until) = self.qr_retry_until.filter(|until| *until > Instant::now()) {
+            ui.label(format!(
+                "QR login available in {} seconds",
+                until
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+                    .saturating_add(1)
+            ));
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
         #[cfg(target_os = "macos")]
         if primary_button(
@@ -1020,45 +1043,24 @@ impl VoiceApp {
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                enum Entry<'a> {
-                    Message(&'a crate::messaging::ChatMessage),
-                    Call(&'a crate::calls::Event),
-                }
-                let mut entries: Vec<(u64, Entry<'_>)> = state
-                    .messages
-                    .iter()
-                    .map(|m| ((m.id >> 22) + 1_420_070_400_000, Entry::Message(m)))
-                    .collect();
-                entries.extend(
-                    state
-                        .call_events
-                        .iter()
-                        .filter(|e| e.channel == channel_id)
-                        .map(|e| (e.at, Entry::Call(e))),
-                );
-                entries.sort_by_key(|entry| entry.0);
-                for (_, entry) in entries {
-                    let message = match entry {
-                        Entry::Call(event) => {
-                            ui.label(RichText::new(event.text).size(12.0).color(theme::SECONDARY));
-                            ui.add_space(8.0);
-                            continue;
-                        }
-                        Entry::Message(message) => message,
-                    };
-
-                    ui.horizontal(|ui| {
+                for message in &state.messages {
+                    if let Some(text) = crate::messaging::system_label(
+                        message,
+                        state.account.as_ref().map(|a| a.id),
+                    ) {
+                        ui.label(RichText::new(text).size(12.0).color(theme::SECONDARY));
+                    } else {
                         ui.label(RichText::new(&message.author_name).strong());
-                    });
-                    ui.add(
-                        egui::Label::new(if message.content.is_empty() {
-                            "[No plain text]"
-                        } else {
-                            &message.content
-                        })
-                        .wrap()
-                        .selectable(true),
-                    );
+                        ui.add(
+                            egui::Label::new(if message.content.is_empty() {
+                                "[Attachment or non-text message]"
+                            } else {
+                                &message.content
+                            })
+                            .wrap()
+                            .selectable(true),
+                        );
+                    }
                     ui.add_space(12.0);
                 }
                 if state.messages.is_empty() && !state.chat_busy {
