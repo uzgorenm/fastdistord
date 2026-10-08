@@ -1,49 +1,59 @@
 # fastdistord
 
-**Discord voice, in a small native app.** A Rust + fastframe personal-account experiment, with macOS Apple Silicon as the primary target.
+**Discord voice and text in a small native app.** Built with Rust and fastframe, with a focused interface for channels, calls and messages.
 
-[Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Verification](docs/VERIFICATION.md) · [Contribute](CONTRIBUTING.md) · [Packaging](PACKAGING.md)
+[Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Contribute](CONTRIBUTING.md)
 
-![Actual offline native Linux window; no account connected](docs/images/offline-startup.png)
+The sign-in screen offers fresh QR login with mobile approval or explicit macOS Keychain reconnect. Connected accounts show servers, channels and persistent call controls.
 
-## Before you start
+## Download and install
 
-**This is experimental, not a live-validated Discord replacement.** Discord restricts supported personal-user voice authorization to approved partners. The included unofficial adapter is off until you accept its account and maintenance risks locally. It may break or lead to account restrictions. No bot, desktop RPC, browser engine, or official-client fallback is substituted.
+Version **0.01** is being verified and has not been published as a GitHub Release yet. Hosted download links will be added after the actual packages are available. For now, [build from source](#build-from-source).
 
-There is **no public release, Homebrew cask, Developer-ID-signed download, or notarized Mac app**. The private CI workflow packages macOS Apple Silicon and Linux x86_64 downloads after successful builds. The new artifact-upload steps must finish before those downloads exist; see below. macOS audio, Keychain, shortcuts and real Discord calls still need authorized native testing. Read [what passed and what did not](docs/VERIFICATION.md).
+Packages: Mac Apple Silicon DMG, Windows x64 EXE installer, and a Linux amd64 Debian package for Ubuntu 24.04 or compatible systems. Mac/Windows packages are not notarized/vendor-signed.
 
-## Voice-first features
+## Features
 
-- Account, server and voice-channel selection; participants and speaking events
-- Two-way CPAL audio through Songbird/Opus and mandatory DAVE encryption
-- Mute, deafen, open microphone or hold-to-talk; default muted
-- Microphone/speaker selection, input meter and output volume
-- Tray-based background calling when supported by the desktop
-- Bounded session/device recovery with explicit mute preserved and no fallback microphone
-- Optional macOS Keychain storage; no recording or telemetry
+- Browse servers and voice channels, with participants and speaking indicators
+- Two-way voice with DAVE encryption, mute, deafen and push-to-talk
+- Choose microphones and speakers, check input levels and adjust output volume
+- Stay in a call from the tray where supported, with bounded device/session recovery
+- Read the latest 50 text-channel messages, refresh and send plain-text messages
+- Connect with a fresh QR code and mobile approval; optional macOS Keychain storage
 
-Use headphones. Echo cancellation, noise suppression and automatic gain control are not implemented.
+The app starts muted and does not record audio or collect telemetry.
 
-## Private build downloads
+## Open and use
 
-Open this repository's [Actions](https://github.com/uzgorenm/fastdistord/actions), choose a successful **Check** run for the desired commit, and look under **Artifacts**. You must be signed into GitHub with access to this private repository. Artifacts expire after14days and are development builds, not published releases.
+1. Launch Fastdistord. You can explore the offline interface without credentials.
+2. Read the account-access sentence, then choose **Connect with QR code**.
+3. Scan the fresh code with Discord on your phone and approve there. Only approve a login you started here. Keychain storage is optional; otherwise the session stays in memory.
+4. Choose a server and voice channel, then select **Join**. Allow microphone access if prompted, confirm encrypted voice readiness and unmute when ready.
+5. For push-to-talk, hold **Ctrl+Shift+Space** or the **Talk** button. Select a text channel to read, refresh or send messages.
+6. **Leave** releases audio devices. Closing the window may keep an active call running; **Quit** ends it.
 
-- **macOS Apple Silicon:** download the macOS artifact, unzip it, then unzip `fastdistord-macos-arm64.zip` to obtain `Fastdistord.app`. It is locally ad-hoc signed, not notarized. Native build/signature checks do not prove microphone or live-call behavior.
-- **Linux x86_64:** download the Linux artifact, unzip it, extract `fastdistord-linux-x86_64.tar.gz`, then run `./fastdistord`. Built on Ubuntu24.04; requires compatible glibc and ALSA/GUI runtime libraries. It is not a universal AppImage.
-- **Windows:** no downloadable build is currently produced or verified.
+See the [first-call walkthrough](docs/GETTING_STARTED.md#account-and-first-call) and [controls and troubleshooting](docs/USING.md).
 
-If the run has no artifacts or is still running, the downloads are not ready. Do not substitute an unverified third-party binary.
+## Current limitations
 
-## Build and open
+Personal-account access uses an unofficial integration that may break or lead to Discord account restrictions. Fastdistord is independent and is not affiliated with Discord.
 
-Install Rust 1.99.0, CMake and your platform prerequisites from [Getting started](docs/GETTING_STARTED.md#build), then:
+Voice and text still need live testing. Video and screen-share sending are unfinished. Use headphones: echo cancellation, noise suppression and automatic gain control are not implemented.
+
+See [verification status](docs/VERIFICATION.md), [media status](docs/MEDIA.md) and the [live-test checklist](docs/LIVE_TEST.md) for details.
+
+## Build from source
+
+Install Rust 1.99.0, CMake and the [platform prerequisites](docs/GETTING_STARTED.md#build), then:
 
 ```sh
 cargo build --locked --release
 ./target/release/fastdistord
 ```
 
-For an Apple Silicon app bundle, **run on macOS** with Xcode command-line tools:
+On Windows, the built executable is `target\release\fastdistord.exe`.
+
+To create and open an Apple Silicon app bundle, run on macOS with Xcode command-line tools:
 
 ```sh
 rustup target add aarch64-apple-darwin
@@ -51,24 +61,16 @@ rustup target add aarch64-apple-darwin
 open dist/Fastdistord.app
 ```
 
-The bundle uses a local ad-hoc signature; it is not notarized. See [Packaging](PACKAGING.md).
+See [Packaging](PACKAGING.md) for bundle details.
 
-## Your first call
+## Help and contributing
 
-1. Read and accept the unofficial-access disclosure if you choose to proceed.
-2. Enter your credential only in the local password field. Never send it in chat or extract it from another application. Saving to Keychain is optional.
-3. Choose an existing server/channel and click **Join**. This opens the selected audio devices; macOS may ask for microphone permission.
-4. Confirm encrypted voice readiness, then unmute when ready. With PTT enabled, hold **Ctrl+Shift+Space** or the visible **Talk** button.
-5. **Leave** releases audio devices. Window close may retain an active call; **Quit** ends it.
+Start with [Controls and help](docs/USING.md). When reporting a problem, include your OS, app commit, steps and what happened. Keep credentials and private account details out of reports and screenshots.
 
-The [first-call walkthrough](docs/GETTING_STARTED.md#account-and-first-call) explains consent and credentials. [Controls and troubleshooting](docs/USING.md) covers shortcuts, reconnecting, devices and background behavior.
+[Contributing](CONTRIBUTING.md) covers development checks and useful bug reports.
 
-## Develop and report problems
+## Acknowledgements and license
 
-Launch without credentials to inspect the real offline UI; it contains no fake account or participant data. See [Contributing](CONTRIBUTING.md) for checks and useful, secret-free bug reports. [Manual acceptance](docs/LIVE_TEST.md) lists the still-required live and hardware tests.
+Built on [fastframe](https://github.com/crmne/fastframe), egui/winit, CPAL, Rubato, Songbird/Opus and Davey/OpenMLS.
 
-## Acknowledgements
-
-Built on [fastframe](https://github.com/crmne/fastframe), egui/winit, CPAL, Rubato, Songbird/Opus and Davey/OpenMLS. [Spotifast](https://github.com/crmne/spotifast) informed the native-shell architecture and this repository's guide-first organization. Its Spotify-specific services, releases and workflows are not part of this project.
-
-MIT project. The vendored Songbird patch retains its ISC license and [modification notes](vendor/songbird/FASTDISTORD_PATCH.md). This independent project is not affiliated with Discord.
+Licensed under [MIT](LICENSE). The vendored Songbird patch retains its [ISC license](vendor/songbird/LICENSE.md) and [modification notes](vendor/songbird/FASTDISTORD_PATCH.md).

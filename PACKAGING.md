@@ -1,29 +1,19 @@
-# Packaging
+# Packaging Fastdistord 0.01
 
-Current version: 0.1.0 experimental. There are no published releases, package-manager recipes, notarized builds or automated release uploads. Successful private CI runs retain macOS arm64 ZIP and Linux x86_64 tarball build artifacts for14days. Upload steps must finish before a run has downloads.
+The public-facing version is **0.01**, tag **v0.01**; Cargo and native package metadata use SemVer **0.0.1**. Releases stay in the private repository. Publishing does not merge PR #1 or change repository visibility.
 
-## Reproducible source build
+## Packages
 
-Commit `Cargo.lock` and the pinned `rust-toolchain.toml`; build with `cargo build --locked --release`. Fastframe, egui and winit use exact Git revisions. Songbird source and its license are vendored with a documented safety patch. Native compilation also requires CMake and platform libraries; a lockfile does not promise bit-for-bit output across different operating systems or compilers.
+- Mac Apple Silicon: `scripts/bundle-macos.sh`, then `scripts/package-macos.sh`. The DMG includes Fastdistord.app, an Applications link and the MIT license. The app is ad-hoc signed, not notarized or Developer ID signed.
+- Windows x64: NSIS 3.11 compiles `packaging/windows/installer.nsi`. It installs for the current user, creates Start menu shortcuts and includes an uninstaller. No administrator access or automatic app launch. Not Authenticode signed.
+- Linux amd64: `scripts/package-linux.sh` creates a `.deb` with desktop entry and license. Runtime dependencies are derived from the actual executable, with required dynamically loaded GUI libraries included. Built on Ubuntu 24.04; compatible Debian/Ubuntu distributions only.
 
-## Apple Silicon `.app`
+Build with Rust 1.99.0, CMake and the prerequisites in [Getting started](docs/GETTING_STARTED.md). Installers include upstream dependency/source notices, font licensing and Songbird patch attribution. All dependencies are locked. Native tools/compiler versions can still affect output; this is not a bit-for-bit reproducibility claim.
 
-On macOS with Xcode command-line tools and CMake:
+## Release verification
 
-```sh
-rustup target add aarch64-apple-darwin
-./scripts/bundle-macos.sh
-```
+Build and test locally on each target platform. Verify mounted DMG contents and signature, installed payload hashes, `--version`, and Windows/Linux installation and uninstall. These package checks do not establish GUI or live-call behavior.
 
-Output: `dist/Fastdistord.app`. The script includes and validates `NSMicrophoneUsageDescription`, copies the arm64 release binary and applies/verifies a local ad-hoc signature. This is not Developer ID signing or notarization. No release is uploaded. Review the bundle on an actual Mac before use or sharing; Linux smoke tests cannot establish native permissions/audio behavior.
+GitHub Actions workflows have been removed. Never use an Actions fallback or a paid build service without approval. Windows and Linux packages need native build hosts; this Mac can build the Apple Silicon app and DMG.
 
-## Validation before any future distribution
-
-- Run contributor checks against the exact source commit.
-- Build and open the native bundle; verify microphone consent and Keychain behavior.
-- Complete explicitly authorized two-way voice, sustained DAVE membership, hidden-call, PTT, recovery and leave/quit tests.
-- Record target-machine release memory/CPU/startup/underruns; compare against the stated goals rather than asserting them.
-- Review licenses, write version-specific release notes and produce checksums.
-- Obtain explicit approval before publishing, changing repository visibility, signing with persistent credentials or uploading a release.
-
-CI checks Linux and macOS source builds and macOS bundle structure. It retains private Actions build artifacts; it does not publish a GitHub Release or claim a live Discord call. There is no updater or download button pointing to nonexistent binaries.
+Publish only actual verified installers. Record the exact source commit in `SOURCE_COMMIT.txt` and asset hashes in `SHA256SUMS`. Verify private repository visibility, upload to a draft release, download and compare every asset, then publish. Never replace a published tag. See [Release notes](packaging/RELEASE_NOTES.md).

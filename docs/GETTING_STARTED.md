@@ -1,8 +1,8 @@
 # Getting started
 
-A small native Rust/fastframe voice-first Discord client experiment. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, text chat, recording, or telemetry.
+A native Rust/fastframe Discord voice and text client. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, recording, or telemetry.
 
-**Experimental and not live-validated.** Discord's supported personal-user `voice` OAuth scope is restricted to approved partners. No qualifying generally available supported route was found for arbitrary existing server channels. This implementation therefore isolates an **unofficial personal-account adapter**, disabled until explicit risk acceptance in the app. It may violate Discord policy, cause account restrictions, or break without notice. It is not affiliated with Discord. Do not use an important account without understanding that risk.
+**Live-call behavior is not yet verified.** Discord's supported personal-user `voice` OAuth scope is restricted to approved partners. No qualifying generally available supported route was found for arbitrary existing server channels. This implementation therefore isolates an **unofficial personal-account adapter**, disabled until explicit risk acceptance in the app. It may violate Discord policy, cause account restrictions, or break without notice. It is not affiliated with Discord. Do not use an important account without understanding that risk.
 
 ## What is implemented
 
@@ -14,6 +14,10 @@ A small native Rust/fastframe voice-first Discord client experiment. macOS Apple
 - Global Ctrl+Shift+Space PTT when the OS backend supports it; visible press-and-hold fallback
 - Session-only credentials by default; explicitly optional macOS Keychain save, removed on logout
 - Audio shutdown on leave/quit/logout, stale join cancellation, safe stop on disconnect/move/permission changes
+
+- Plain-text guild messaging: bounded history, manual refresh and explicit Send; mentions and embeds suppressed
+
+Discord video and screen sending are unfinished and are not exposed as working call controls; see [media status](MEDIA.md). League overlay work is stopped.
 
 ## Build
 
@@ -45,19 +49,23 @@ The script validates the microphone usage description and adds a local ad-hoc si
 ## Account and first call
 
 1. Read the unofficial-access risk disclosure. No official desktop/web client needs to be running for this adapter.
-2. Enter your own credential **only in the local password field**. Never paste it into chat, commit it, put it on a command line, or extract it from another application's files. No credential acquisition or protection-bypass mechanism is supplied.
-3. Leave “Remember in macOS Keychain” unchecked for memory-only access. Connecting with a saved credential also requires risk acceptance.
+2. Read the short account-access disclosure and choose **Connect with QR code**. Scan the code using Discord on your phone and approve the login there. Only approve a code you started yourself. An expired/canceled login needs a fresh Connect.
+3. Leave “Remember in macOS Keychain” unchecked for session-only access. Optional saving happens after successful account validation. **Connect from Keychain** reads a credential you previously chose to save in this app. Existing local session entry remains available under its disclosure; never extract another app’s credentials or put tokens in chat or commands.
 4. Choose a server and voice channel, then click Join. **This action authorizes opening your selected audio devices and joining that specific channel.** The OS may request microphone permission.
 5. Transmission starts muted. Use headphones; select your intended mode and unmute. Enabling PTT does not itself unmute. Deafen also blocks outgoing audio.
 6. Leave releases capture. Closing the window keeps an active call resident; use the tray to reopen or Quit to exit.
 
 Server mute/deafen/suppression is respected. A server move, channel change or uncertain access stops audio rather than automatically undoing the change. Select/rejoin explicitly after checking access. Device changes apply at the next Join. Transient network/device failures use bounded recovery of the same authorized session and pinned devices; mute is preserved and PTT is reset. Invalid/ambiguous sessions, server revocation and exhausted retries require explicit reconnect/rejoin. See [Recovery boundaries](USING.md#recovery-boundaries).
 
+### Login and account sync
+
+Discord’s standard OAuth scopes can identify an account and list basic guild information, but its `voice` scope requires approved-partner access. That sign-in cannot authorize this adapter. No supported export or synchronization of the installed Discord client’s session credential is provided. Fresh QR login instead asks for mobile approval of broad personal-account access. Remote interoperability remains unverified until the user tests it.
+
 ## Limits
 
 No AEC, noise suppression or automatic gain control. Speakerphone use may echo. Bluetooth routes and sleep/wake require hardware testing. No claim of production-grade background PTT safety: platform key-release reliability still needs live verification; focus/visibility transitions close the gate. Native Wayland global shortcuts are unavailable with the selected backend and use the visible hold-to-talk fallback.
 
-Initial guild voice snapshots and later updates seed the roster, but this experimental adapter does not yet implement every undocumented personal Gateway payload; missing names may display a user ID. Stage channels are excluded. Large servers are bounded to protect memory. Permission/channel updates conservatively stop a call. Not every browser/client capability, account challenge or protocol variation is supported.
+Initial guild voice snapshots and later updates seed the roster, but this adapter does not yet implement every undocumented personal Gateway payload; missing names may display a user ID. Stage channels are excluded. Large servers are bounded to protect memory. Permission/channel updates conservatively stop a call. Not every browser/client capability, account challenge or protocol variation is supported.
 
 Do not treat local tests, a loopback, UDP readiness or a successfully compiled binary as a successful Discord call. See [verification](VERIFICATION.md) and [manual acceptance](LIVE_TEST.md).
 
@@ -67,4 +75,4 @@ Do not treat local tests, a loopback, UDP readiness or a successfully compiled b
 
 MIT project; vendored Songbird retains its ISC license and modification notes. Fastframe/egui/winit, CPAL, Rubato, Opus, Davey and OpenMLS retain their own upstream licenses. No codec or cryptography is reimplemented.
 
-References: [fastframe](https://github.com/crmne/fastframe), [Spotifast architecture](https://github.com/crmne/spotifast), [Discord OAuth scopes](https://docs.discord.com/developers/topics/oauth2), [voice/DAVE protocol](https://docs.discord.com/developers/topics/voice-connections), [Songbird](https://github.com/serenity-rs/songbird), [official libdave](https://github.com/discord/libdave), [Davey](https://github.com/Snazzah/davey).
+References: [fastframe](https://github.com/crmne/fastframe), [Discord OAuth scopes](https://docs.discord.com/developers/topics/oauth2), [voice/DAVE protocol](https://docs.discord.com/developers/topics/voice-connections), [Songbird](https://github.com/serenity-rs/songbird), [official libdave](https://github.com/discord/libdave), [Davey](https://github.com/Snazzah/davey).

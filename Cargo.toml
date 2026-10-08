@@ -1,13 +1,28 @@
 [package]
 name = "fastdistord"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
-description = "A small, voice-first personal Discord client experiment"
+description = "A native Discord voice and text client"
 
 [dependencies]
+# Native fresh-session QR handshake; no embedded browser or credential extraction.
+rsa = "0.9.8"
+sha2 = "0.10"
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
 anyhow = "1"
+# Transport AEAD for the separate bounded media pipeline.
+aes-gcm = { version = "=0.10.3", features = ["zeroize"] }
+# Erase expanded AES/GHASH state when a media cipher is revoked/dropped.
+# These features also apply to the pinned shared RustCrypto implementations.
+aes = { version = "=0.8.4", features = ["zeroize"] }
+ghash = { version = "=0.5.1", features = ["zeroize"] }
+polyval = { version = "=0.6.2", features = ["zeroize"] }
+chacha20poly1305 = "=0.10.1"
+# Shared codec-aware DAVE implementation for the separate video pipeline.
+davey = "=0.1.4"
 # Davey has TRACE messages containing key material; compile debug/trace out.
 tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
 async-trait = "0.1"
@@ -22,7 +37,7 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-zeroize = { version = "1", features = ["derive"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
 songbird = { path = "vendor/songbird", default-features = false, features = ["driver", "receive", "rustls", "tungstenite"] }
 egui = "=0.36.1"
 eframe = { version = "=0.36.1", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
@@ -33,6 +48,16 @@ fastframe-text = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+objc2 = "=0.6.5"
+block2 = "=0.6.2"
+dispatch2 = "=0.3.1"
+objc2-foundation = "=0.3.2"
+objc2-core-foundation = "=0.3.2"
+objc2-core-media = "=0.3.2"
+objc2-core-video = "=0.3.2"
+objc2-video-toolbox = "=0.3.2"
+objc2-av-foundation = "=0.3.2"
+objc2-screen-capture-kit = "=0.3.2"
 
 [patch.crates-io]
 egui = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
@@ -45,6 +70,12 @@ winit = { git = "https://github.com/crmne/winit", rev = "ed7caa9023f10b397f5b6ec
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+[dev-dependencies]
+openmls = "=0.8.2"
+openmls_rust_crypto = "=0.5.1"
+openmls_basic_credential = "=0.5.0"
+tls_codec = "=0.4.2"
 
 [lints.clippy]
 dbg_macro = "deny"

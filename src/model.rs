@@ -1,3 +1,4 @@
+use crate::messaging::{ChatMessage, TextChannel};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +63,13 @@ pub struct UiState {
     pub selected_input: Option<String>,
     pub selected_output: Option<String>,
     pub audio_diagnostics: String,
+    pub text_channels: Vec<TextChannel>,
+    pub selected_text_channel: Option<u64>,
+    pub messages: Vec<ChatMessage>,
+    pub chat_busy: bool,
+    pub chat_sending: bool,
+    pub chat_status: String,
+    pub sent_revision: u64,
 }
 impl Default for UiState {
     fn default() -> Self {
@@ -71,8 +79,7 @@ impl Default for UiState {
             channels: vec![],
             participants: vec![],
             phase: Phase::Offline,
-            status: "Connect an account to begin. Unofficial access is disabled until you opt in."
-                .into(),
+            status: String::new(),
             selected_guild: None,
             selected_channel: None,
             muted: true,
@@ -86,6 +93,13 @@ impl Default for UiState {
             selected_input: None,
             selected_output: None,
             audio_diagnostics: "No active audio devices".into(),
+            text_channels: vec![],
+            selected_text_channel: None,
+            messages: vec![],
+            chat_busy: false,
+            chat_sending: false,
+            chat_status: "Choose a text channel to read its latest 50 messages.".into(),
+            sent_revision: 0,
         }
     }
 }
@@ -103,6 +117,12 @@ pub enum Command {
     Logout,
     Reconnect,
     SelectGuild(u64),
+    SelectTextChannel(u64),
+    RefreshMessages,
+    SendMessage {
+        channel_id: u64,
+        content: String,
+    },
     Join {
         guild_id: u64,
         channel_id: u64,

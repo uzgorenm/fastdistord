@@ -1,3 +1,37 @@
+# Version 0.01 packaging and production UI, 2026-10-08
+
+Current production UI contains account entry, voice and text only. Standalone media previews, codec diagnostics and the audio diagnostics panel were removed; automated/headless media tests remain. Local format, strict Clippy, all 77 deterministic tests and the SemVer 0.0.1 Mac bundle/signature checks passed. The user-facing version is 0.01. Native GUI inspection was not retried after cancellation. Hardware and live Discord behavior remain unverified; the user will perform live testing.
+
+GitHub Actions workflows were removed at the user’s request. Packaging now uses local scripts on native build hosts. Historical runs below remain historical evidence only; they do not verify newer changes or a published release.
+
+# Account flow and compact UI follow-up, 2026-10-08
+
+The signed-out view now uses a centered account form instead of empty server and call panels. Session entry and explicit Keychain reconnect have separate tabs. Risk acceptance still gates both actions; changing tabs does not load credentials, and password undo history is cleared on either path. Connected accounts retain channel navigation, participant states, text composition and persistent mute/deafen/PTT/leave controls with tighter spacing. Diagnostic details remain in Settings. The obsolete startup screenshot was removed from the README because it no longer represents the current layout.
+
+Local format and strict Clippy checks, all 77 deterministic tests, the release build and Mac bundle/signature validation passed. No new tests were added for this presentation change; existing privacy and authorization regression checks remain intact.
+
+Current Discord OAuth documentation confirms that the `voice` scope requires approved-partner access. Standard identity/guild OAuth cannot authorize this adapter. No supported installed-client credential export or account sync was added. No credential was read or entered, and no outgoing Discord content was sent.
+
+Computer-use inventory reported Fastdistord running. Read-only selection of the existing Fastdistord app via `cua.getApp("me.uzgoren.fastdistord")` was canceled by the user after 5959.5 seconds, before window content was returned. It was not retried. Visual layout, keyboard traversal, resizing and native accessibility remain unverified for this follow-up; the prior Linux GUI check below applies only to its older UI.
+
+# Native Mac continuation, 2026-10-08
+
+The Mac checkout began at `bb9536ba5b2356e81ba59bdb29e6184d10a0eb6e`. The interrupted account/messaging edits were preserved and integrated with text-channel selection, manual history refresh and explicit plain-text Send. Pending history requests are canceled on scope changes; stale results cannot replace the current account/channel snapshot. A regression test checks that scope changes erase displayed text and cancel pending reads without altering voice mute state.
+
+Native Apple Silicon Rust 1.99.0 checks passed: format, strict Clippy, 77 deterministic tests and six standalone Songbird DAVE policy tests. Three hardware/socket-dependent tests are ignored by default. The composed headless native test was run separately and passed: synthetic H.264 encoding, real two-participant DAVE encryption, RTP fragmentation, transport AEAD/authentication, reassembly, DAVE decryption, VideoToolbox decoding and checkerboard pixel fidelity. Tests also cover tamper/replay rejection, participant removal and stale fragment authority. Both transport modes passed authentication/replay tests, including nonce exhaustion and permanent revocation. A synthetic DAVE/RTP/AEAD loopback UDP test passed separately. These are local fixtures, not Discord interoperability or live membership verification.
+
+A local release build and `scripts/bundle-macos.sh` succeeded. `plutil` and strict deep ad-hoc signature verification passed for `dist/Fastdistord.app`. The bundle includes microphone and camera usage descriptions; the screen picker requires macOS 14 at runtime. A cached build-script warning reported debug-info stripping unavailable; compilation and signing still succeeded. The bundle is not Developer ID signed or notarized.
+
+The exact computer-use action `cua.getApp('/Users/mehmetuzgoren/Desktop/Side Projects/fastdistord/dist/Fastdistord.app')` returned **aborted by user** after 3121.2 seconds. It was not retried. App startup was not confirmed; this was not a macOS permission-denial result. The bundle remains available for manual opening. No GUI screenshot, packaged microphone/camera permission, physical device preview/round trip, background call, PTT hardware result or Mac resource measurement is claimed.
+
+The app now exposes explicit local camera/window preview. Capture adapters compile, but no camera/screen content was captured or transmitted. The offline RTP/AEAD helpers do not implement Discord negotiation or network video. See [media status](MEDIA.md).
+
+No credential was entered and no account/channel session or outgoing text/audio/video test was performed. Two-way voice, live DAVE membership changes, leave/rejoin and recovery require user credential handoff, target channel, second participant and approved test content. League overlay work and League interactions are stopped. No public release was published.
+
+Focused source review fixed editor undo retention across text scope changes/logout, clearing drafts even while the preview tab is open, stopping preview on minimize/occlusion, and clearing its texture after native capture stops. RustCrypto zeroization features now erase expanded AES/GHASH state on drop. The editor regression test passed; physical window/capture behavior still needs manual verification.
+
+The report below records earlier cloud checks, not native hardware acceptance.
+
 # Verification report — 2026-10-07
 
 ## Passed locally in the cloud

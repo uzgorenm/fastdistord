@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Fastdistord
+Comment=Discord voice and text
+Exec=fastdistord
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=fastdistord

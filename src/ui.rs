@@ -19,6 +19,7 @@ mod theme;
 
 const METER_INTERVAL: Duration = Duration::from_millis(100);
 const TOKEN_EDIT_ID: &str = "session_token";
+const MESSAGE_EDIT_ID: &str = "message_draft";
 
 /// Runs the native window and tray until the user explicitly quits.
 ///
@@ -86,6 +87,9 @@ struct VoiceApp {
     token: Zeroizing<String>,
     risk_accepted: bool,
     remember: bool,
+    qr_login: Option<crate::qr_login::Login>,
+    qr_code: Option<(qrcode::QrCode, std::time::Instant)>,
+    qr_status: String,
     settings_open: bool,
     selected_input: Option<String>,
     selected_output: Option<String>,
@@ -97,6 +101,11 @@ struct VoiceApp {
     shutdown_sent: bool,
     last_tray_revision: Option<u64>,
     local_error: Option<String>,
+    text_open: bool,
+    message_draft: String,
+    draft_channel: Option<u64>,
+    draft_reset_pending: bool,
+    last_sent_revision: u64,
 }
 
 impl VoiceApp {
@@ -137,6 +146,9 @@ impl VoiceApp {
             token: Zeroizing::new(String::new()),
             risk_accepted: false,
             remember: false,
+            qr_login: None,
+            qr_code: None,
+            qr_status: String::new(),
             settings_open: false,
             selected_input: None,
             selected_output: None,
@@ -148,6 +160,11 @@ impl VoiceApp {
             shutdown_sent: false,
             last_tray_revision: None,
             local_error: None,
+            text_open: false,
+            message_draft: String::new(),
+            draft_channel: None,
+            draft_reset_pending: false,
+            last_sent_revision: 0,
         }
     }
 
@@ -159,6 +176,21 @@ impl VoiceApp {
     }
 
     fn send(&mut self, command: Command) {
+        if matches!(&command, Command::Logout | Command::Quit) {
+            self.qr_login = None;
+            self.qr_code = None;
+        }
+        if matches!(
+            &command,
+            Command::SelectGuild(_)
+                | Command::SelectTextChannel(_)
+                | Command::Logout
+                | Command::Quit
+        ) {
+            self.message_draft.zeroize();
+            self.draft_channel = None;
+            self.draft_reset_pending = true;
+        }
         // Privacy-closing controls act immediately, even if the backend is
         // busy. Opening transmission is left to the authoritative backend.
         match &command {
@@ -182,6 +214,9 @@ impl VoiceApp {
     }
 
     fn background(&mut self, ctx: &egui::Context) {
+        if self.draft_reset_pending {
+            clear_message_editor(ctx);
+        }
         let events: Vec<_> = self.tray.as_ref().map(Tray::events).unwrap_or_default();
         let (muted, deafened, has_account, phase, revision, ptt_enabled) = {
             let state = self
@@ -248,6 +283,7 @@ impl VoiceApp {
         self.hide_intent = false;
         self.release_ptt();
         self.send_shutdown();
+        clear_message_editor(ctx);
         if !self.hidden {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -259,20 +295,25 @@ impl VoiceApp {
             self.gate.fail_closed();
             self.ptt.stop();
             self.token.zeroize();
+            self.message_draft.zeroize();
+            self.draft_reset_pending = true;
             self.release_ptt();
             let _ = self.commands.send(Command::Quit);
         }
     }
 
     fn header(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             waveform(ui, theme::ACCENT, Vec2::new(25.0, 28.0));
             ui.add_space(5.0);
             ui.label(
-                RichText::new("fastdistord").font(fastframe_fonts::Weight::SemiBold.font_id(20.0)),
+                RichText::new("fastdistord").font(fastframe_fonts::Weight::SemiBold.font_id(18.0)),
             );
             ui.add_space(10.0);
-            ui.label(RichText::new("VOICE").size(10.0).color(theme::SECONDARY));
+            if state.account.is_some() {
+                ui.selectable_value(&mut self.text_open, false, "Voice");
+                ui.selectable_value(&mut self.text_open, true, "Text");
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
@@ -287,7 +328,7 @@ impl VoiceApp {
     }
 
     fn navigation(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        ui.set_width(206.0);
+        ui.set_width(184.0);
         section_label(ui, "SERVERS");
         ui.add_space(8.0);
         let guild_height = (ui.available_height() * 0.36).clamp(85.0, 185.0);
@@ -310,9 +351,12 @@ impl VoiceApp {
                 for guild in &state.guilds {
                     let selected = state.selected_guild == Some(guild.id);
                     if ui
-                        .add_sized(
-                            [ui.available_width(), 35.0],
-                            egui::Button::new(&guild.name).truncate().selected(selected),
+                        .add_enabled(
+                            !state.chat_sending,
+                            egui::Button::new(&guild.name)
+                                .truncate()
+                                .selected(selected)
+                                .min_size(Vec2::new(ui.available_width(), 35.0)),
                         )
                         .on_hover_text(&guild.name)
                         .clicked()
@@ -325,8 +369,40 @@ impl VoiceApp {
         ui.add_space(15.0);
         ui.separator();
         ui.add_space(12.0);
-        section_label(ui, "VOICE CHANNELS");
+        section_label(
+            ui,
+            if self.text_open {
+                "TEXT CHANNELS"
+            } else {
+                "VOICE CHANNELS"
+            },
+        );
         ui.add_space(8.0);
+        if self.text_open {
+            egui::ScrollArea::vertical()
+                .id_salt("text_channels")
+                .show(ui, |ui| {
+                    for channel in &state.text_channels {
+                        if ui
+                            .add_enabled(
+                                !state.chat_sending,
+                                egui::Button::new(format!("# {}", channel.name))
+                                    .truncate()
+                                    .selected(state.selected_text_channel == Some(channel.id))
+                                    .min_size(Vec2::new(ui.available_width(), 34.0)),
+                            )
+                            .on_hover_text(&channel.name)
+                            .clicked()
+                        {
+                            self.send(Command::SelectTextChannel(channel.id));
+                        }
+                    }
+                    if state.text_channels.is_empty() {
+                        ui.label("Choose a server to see text channels.");
+                    }
+                });
+            return;
+        }
         egui::ScrollArea::vertical()
             .id_salt("voice_channels")
             .auto_shrink([false, false])
@@ -372,105 +448,161 @@ impl VoiceApp {
     }
 
     fn connect_panel(&mut self, ui: &mut egui::Ui, state: &UiState) {
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new("A little less between you and your call.")
-                .font(fastframe_fonts::Weight::SemiBold.font_id(26.0)),
-        );
-        ui.add_space(9.0);
-        ui.label(
-            RichText::new("A compact, local desktop voice client.")
-                .size(15.0)
-                .color(theme::SECONDARY),
-        );
+        ui.set_max_width(440.0);
+        ui.heading("Connect to Discord");
+        ui.add_space(6.0);
+        ui.label(RichText::new("Voice and text, in a small native app.").color(theme::SECONDARY));
         ui.add_space(16.0);
+        ui.label("This unofficial login gives Fastdistord broad access to your Discord account and may put your account at risk.");
+        ui.collapsing("Details", |ui| {
+            ui.label("This is a personal-account session, not a limited OAuth grant. Discord may restrict your account. Only approve a code you started here. Logout removes local access; use Discord’s device/session controls to revoke access, or change your Discord password to end all sessions.");
+            ui.hyperlink_to("Discord account policy", "https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots");
+        });
+        ui.add_space(12.0);
+        #[cfg(target_os = "macos")]
+        ui.add_enabled_ui(self.qr_login.is_none(), |ui| {
+            ui.checkbox(&mut self.remember, "Remember in macOS Keychain");
+        });
         ui.label(
-            RichText::new("Connect your Discord account")
-                .strong()
-                .size(16.0),
+            RichText::new(if self.remember {
+                "Saved only after a successful connection."
+            } else {
+                "Session only. Nothing is saved to disk."
+            })
+            .size(12.0)
+            .color(theme::SECONDARY),
         );
-        ui.add_space(9.0);
-        ui.label("This experimental personal-account adapter is unofficial. Discord prohibits automating normal user accounts; using it may put your account at risk.");
-        ui.add_space(5.0);
-        ui.hyperlink_to("Read Discord’s self-bot policy", "https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots");
-        ui.add_space(16.0);
-        ui.label(RichText::new("Session token").strong());
         let connecting = matches!(state.phase, Phase::Connecting | Phase::Reconnecting);
-        ui.add_enabled(
-            !connecting,
-            egui::TextEdit::singleline(&mut *self.token)
-                .id(egui::Id::new(TOKEN_EDIT_ID))
-                .password(true)
-                .hint_text("Paste a token locally")
-                .desired_width(f32::INFINITY),
-        );
+        let events: Vec<_> = self
+            .qr_login
+            .as_ref()
+            .map(|login| login.events.try_iter().collect())
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                crate::qr_login::Event::Code(code, expires) => {
+                    self.qr_code = Some((code, expires));
+                    self.qr_status = "Scan with Discord on your phone, then approve there.".into();
+                }
+                crate::qr_login::Event::AwaitingApproval => {
+                    self.qr_code = None;
+                    self.qr_status = "Scanned. Approve or cancel on your phone.".into();
+                }
+                crate::qr_login::Event::Token(mut token) => {
+                    self.qr_code = None;
+                    self.qr_login = None;
+                    self.qr_status.clear();
+                    self.send(Command::Connect {
+                        token: std::mem::take(&mut *token),
+                        risk_accepted: true,
+                        remember: self.remember,
+                    });
+                }
+                crate::qr_login::Event::Failed(message) => {
+                    self.qr_code = None;
+                    self.qr_login = None;
+                    self.qr_status = message.into();
+                }
+            }
+        }
+        if let Some((_, expires)) = &self.qr_code
+            && std::time::Instant::now() >= *expires
+        {
+            self.qr_code = None;
+            self.qr_login = None;
+            self.qr_status = "Code expired. Choose Connect for a fresh code.".into();
+        }
+        if let Some((code, _)) = &self.qr_code {
+            // Four-module quiet zone, integer pixel modules, opaque black/white.
+            let module = (216.0 / (code.width() + 8) as f32).floor().max(1.0);
+            let size = module * (code.width() + 8) as f32;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+            for y in 0..code.width() {
+                for x in 0..code.width() {
+                    if code[(x, y)] == qrcode::Color::Dark {
+                        let pos =
+                            rect.min + Vec2::new((x + 4) as f32 * module, (y + 4) as f32 * module);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(pos, Vec2::splat(module)),
+                            0.0,
+                            Color32::BLACK,
+                        );
+                    }
+                }
+            }
+        }
+        if self.qr_login.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            if ui.button("Cancel login").clicked() {
+                self.qr_login = None;
+                self.qr_code = None;
+                self.qr_status = "Login canceled.".into();
+            }
+        } else if primary_button(ui, "Connect with QR code", !connecting).clicked() {
+            self.token.zeroize();
+            self.risk_accepted = true;
+            self.qr_status = "Creating a fresh login code…".into();
+            match crate::qr_login::Login::start(ui.ctx().clone()) {
+                Ok(login) => self.qr_login = Some(login),
+                Err(_) => {
+                    self.qr_status = "Could not start login. Choose Connect to try again.".into()
+                }
+            }
+        }
+        if !self.qr_status.is_empty() {
+            ui.label(&self.qr_status);
+        }
+        #[cfg(target_os = "macos")]
+        if primary_button(
+            ui,
+            "Connect from Keychain",
+            !connecting && self.qr_login.is_none(),
+        )
+        .clicked()
+        {
+            self.risk_accepted = true;
+            self.send(Command::ConnectSaved {
+                risk_accepted: true,
+            });
+        }
+        ui.collapsing("Use an existing session credential", |ui| {
+            ui.checkbox(
+                &mut self.risk_accepted,
+                "I understand the account-access risk.",
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut *self.token)
+                    .id(egui::Id::new(TOKEN_EDIT_ID))
+                    .password(true)
+                    .hint_text("Enter only locally"),
+            );
+            if primary_button(
+                ui,
+                "Connect",
+                connect_allowed(&self.token, self.risk_accepted, connecting)
+                    && self.qr_login.is_none(),
+            )
+            .clicked()
+            {
+                let token = std::mem::take(&mut *self.token);
+                self.send(Command::Connect {
+                    token,
+                    risk_accepted: true,
+                    remember: self.remember,
+                });
+            }
+        });
         if let Some(mut edit_state) =
             egui::TextEdit::load_state(ui.ctx(), egui::Id::new(TOKEN_EDIT_ID))
         {
             edit_state.clear_undoer();
             edit_state.store(ui.ctx(), egui::Id::new(TOKEN_EDIT_ID));
         }
-        ui.label(
-            RichText::new(if self.remember {
-                "Saved only in macOS Keychain when you connect. Never logged."
-            } else {
-                "Kept in this process only. Never saved to a file or logged."
-            })
-            .size(12.0)
-            .color(theme::SECONDARY),
-        );
-        #[cfg(target_os = "macos")]
-        {
-            ui.add_space(8.0);
-            ui.checkbox(&mut self.remember, "Remember in macOS Keychain");
-        }
-        ui.add_space(12.0);
-        ui.checkbox(
-            &mut self.risk_accepted,
-            "I understand the account risk and want to enable this adapter.",
-        );
-        ui.add_space(12.0);
-        let can_connect = connect_allowed(&self.token, self.risk_accepted, connecting);
-        if primary_button(
-            ui,
-            if connecting {
-                "Connecting…"
-            } else {
-                "Connect account"
-            },
-            can_connect,
-        )
-        .clicked()
-        {
-            let token = std::mem::take(&mut *self.token);
-            self.local_error = None;
-            self.send(Command::Connect {
-                token,
-                risk_accepted: true,
-                remember: self.remember,
-            });
-        }
-        #[cfg(target_os = "macos")]
-        {
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(
-                    !connecting && self.risk_accepted,
-                    egui::Button::new("Connect with saved credential"),
-                )
-                .clicked()
-            {
-                self.token.zeroize();
-                self.local_error = None;
-                self.send(Command::ConnectSaved {
-                    risk_accepted: true,
-                });
-            }
-        }
         ui.add_space(9.0);
         ui.label(
             RichText::new(
-                "Your microphone stays closed until you choose Join voice. Microphone mute is on by default.",
+                "Microphone muted by default. Audio devices open only when you join voice.",
             )
             .size(12.0)
             .color(theme::SECONDARY),
@@ -569,9 +701,9 @@ impl VoiceApp {
                 }
             }
         });
-        ui.add_space(22.0);
+        ui.add_space(12.0);
         ui.separator();
-        ui.add_space(17.0);
+        ui.add_space(10.0);
         if active && !joining {
             section_label(
                 ui,
@@ -659,12 +791,119 @@ impl VoiceApp {
         }
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui, state: &UiState) {
+    fn sync_text_draft(&mut self, ctx: &egui::Context, state: &UiState) {
+        if self.draft_reset_pending
+            || state.account.is_none()
+            || self.draft_channel != state.selected_text_channel
+            || self.last_sent_revision != state.sent_revision
+        {
+            self.message_draft.zeroize();
+            clear_message_editor(ctx);
+            self.draft_reset_pending = false;
+            self.draft_channel = state.selected_text_channel;
+            self.last_sent_revision = state.sent_revision;
+        }
+    }
+
+    fn text_panel(&mut self, ui: &mut egui::Ui, state: &UiState) {
+        let Some(channel) = state
+            .text_channels
+            .iter()
+            .find(|c| Some(c.id) == state.selected_text_channel)
+        else {
+            ui.heading("Choose a text channel");
+            ui.label("Choose a channel on the left to read or send messages.");
+            return;
+        };
         ui.horizontal(|ui| {
+            ui.add_sized(
+                [(ui.available_width() - 90.0).max(80.0), 30.0],
+                egui::Label::new(RichText::new(format!("# {}", channel.name)).heading()).truncate(),
+            )
+            .on_hover_text(&channel.name);
+            if ui
+                .add_enabled(!state.chat_busy, egui::Button::new("Refresh"))
+                .clicked()
+            {
+                self.send(Command::RefreshMessages);
+            }
+        });
+        ui.label(
+            RichText::new(&state.chat_status)
+                .size(12.0)
+                .color(theme::SECONDARY),
+        );
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical()
+            .id_salt(("messages", channel.id))
+            .max_height((ui.available_height() - 160.0).max(60.0))
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for message in &state.messages {
+                    ui.label(RichText::new(&message.author_name).strong());
+                    ui.add(
+                        egui::Label::new(if message.content.is_empty() {
+                            "[No plain text]"
+                        } else {
+                            &message.content
+                        })
+                        .wrap()
+                        .selectable(true),
+                    );
+                    ui.add_space(10.0);
+                }
+                if state.messages.is_empty() && !state.chat_busy {
+                    ui.label("No messages in this snapshot.");
+                }
+            });
+        ui.separator();
+        ui.label(format!("Message to # {}", channel.name));
+        ui.add_enabled(
+            !state.chat_sending,
+            egui::TextEdit::multiline(&mut self.message_draft)
+                .id(egui::Id::new(MESSAGE_EDIT_ID))
+                .char_limit(crate::messaging::MAX_MESSAGE_CHARS)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal(|ui| {
+            let valid = crate::messaging::send_payload(&self.message_draft).is_ok();
+            if primary_button(
+                ui,
+                if state.chat_sending {
+                    "Sending…"
+                } else {
+                    "Send"
+                },
+                valid && !state.chat_busy,
+            )
+            .clicked()
+            {
+                self.send(Command::SendMessage {
+                    channel_id: channel.id,
+                    content: self.message_draft.clone(),
+                });
+            }
+            ui.label(format!("{}/2000", self.message_draft.chars().count()));
+        });
+        ui.label(
+            RichText::new(
+                "Plain text · mentions and link embeds suppressed · no automatic send retries",
+            )
+            .size(12.0)
+            .color(theme::SECONDARY),
+        );
+    }
+
+    fn controls(&mut self, ui: &mut egui::Ui, state: &UiState) {
+        ui.horizontal_wrapped(|ui| {
             if let Some(account) = &state.account {
                 avatar(ui, &account.name, false);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(&account.name).strong());
+                    ui.set_max_width(160.0);
+                    ui.add(egui::Label::new(RichText::new(&account.name).strong()).truncate())
+                        .on_hover_text(&account.name);
                     ui.label(
                         RichText::new(if state.muted {
                             "Microphone muted"
@@ -731,7 +970,7 @@ impl VoiceApp {
             });
         });
         ui.add_space(9.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if state.ptt_enabled {
                 let talk = ui.add_enabled(
                     state.phase == Phase::VoiceReady && !state.muted && !state.deafened,
@@ -829,9 +1068,6 @@ impl VoiceApp {
                 ui.add_space(10.0);
                 ui.label(RichText::new("Device changes apply to your next Join. Leave and rejoin to switch an active call. System default uses your operating system’s selected device.").size(12.0).color(theme::SECONDARY));
                 ui.add_space(12.0);
-                ui.collapsing("Audio diagnostics", |ui| {
-                    ui.label(RichText::new(&state.audio_diagnostics).monospace().size(11.0));
-                });
                 ui.add_space(15.0);
                 ui.separator();
                 ui.add_space(12.0);
@@ -857,7 +1093,10 @@ impl VoiceApp {
                         self.token.zeroize();
                         self.risk_accepted = false;
                         self.remember = false;
+
                         self.browsing_channel = None;
+                        self.qr_login = None;
+                        self.qr_code = None;
                         self.send(Command::Logout);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -873,37 +1112,40 @@ impl VoiceApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let state = self.snapshot();
         let ctx = ui.ctx().clone();
+        self.sync_text_draft(&ctx, &state);
         egui::Panel::top("header")
             .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(theme::BACKGROUND)
-                    .inner_margin(egui::Margin::symmetric(20, 14)),
+                    .inner_margin(egui::Margin::symmetric(16, 10)),
             )
             .show(ui, |ui| self.header(ui, &state));
-        egui::Panel::bottom("call_controls")
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(18, 12))
-                    .stroke(Stroke::new(1.0, theme::BORDER)),
-            )
-            .show(ui, |ui| self.controls(ui, &state));
-        egui::Panel::left("navigation")
-            .exact_size(234.0)
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ui, |ui| self.navigation(ui, &state));
+        if state.account.is_some() {
+            egui::Panel::bottom("call_controls")
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin::symmetric(16, 8))
+                        .stroke(Stroke::new(1.0, theme::BORDER)),
+                )
+                .show(ui, |ui| self.controls(ui, &state));
+            egui::Panel::left("navigation")
+                .exact_size(208.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin::same(12)),
+                )
+                .show(ui, |ui| self.navigation(ui, &state));
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(theme::BACKGROUND)
-                    .inner_margin(egui::Margin::symmetric(28, 18)),
+                    .inner_margin(egui::Margin::symmetric(20, 16)),
             )
             .show(ui, |ui| {
                 if let Some(error) = &self.local_error {
@@ -935,11 +1177,24 @@ impl VoiceApp {
                     ui.add_space(12.0);
                 }
                 if state.account.is_none() {
+                    self.message_draft.zeroize();
+                    self.draft_channel = None;
+                    self.last_sent_revision = state.sent_revision;
                     egui::ScrollArea::vertical()
                         .id_salt("connect_panel")
-                        .show(ui, |ui| self.connect_panel(ui, &state));
+                        .show(ui, |ui| {
+                            let inset = ((ui.available_width() - 440.0) * 0.5).max(0.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(inset);
+                                ui.vertical(|ui| self.connect_panel(ui, &state));
+                            });
+                        });
                 } else {
-                    self.call_panel(ui, &state);
+                    if self.text_open {
+                        self.text_panel(ui, &state);
+                    } else {
+                        self.call_panel(ui, &state);
+                    }
                 }
             });
         self.settings(&ctx, &state);
@@ -973,6 +1228,8 @@ impl Resident for VoiceApp {
     }
 
     fn window_gone(&mut self) {
+        self.qr_login = None;
+        self.qr_code = None;
         self.hidden = true;
         self.send(Command::SetUiVisible(false));
         self.hide_intent = false;
@@ -1048,6 +1305,15 @@ impl eframe::App for Window {
 
     fn persist_egui_memory(&self) -> bool {
         false
+    }
+}
+
+fn clear_message_editor(ctx: &egui::Context) {
+    // Undo points contain prior draft strings. Erasing the visible draft alone
+    // would allow Cmd/Ctrl+Z to restore content from an earlier channel/account.
+    if let Some(mut state) = egui::TextEdit::load_state(ctx, egui::Id::new(MESSAGE_EDIT_ID)) {
+        state.clear_undoer();
+        state.store(ctx, egui::Id::new(MESSAGE_EDIT_ID));
     }
 }
 
@@ -1256,6 +1522,27 @@ fn draw_icon(size: usize, template: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_message_editor_revokes_prior_draft_undo_and_redo() {
+        use egui::{text::CCursorRange, text_edit::TextEditState};
+        let ctx = egui::Context::default();
+        let mut state = TextEditState::default();
+        let empty = (CCursorRange::default(), String::new());
+        let private = (CCursorRange::default(), "private unsent draft".to_owned());
+        let mut undoer = state.undoer();
+        undoer.add_undo(&empty);
+        undoer.add_undo(&private);
+        assert_eq!(undoer.undo(&private), Some(&empty));
+        assert!(undoer.has_redo(&empty));
+        state.set_undoer(undoer);
+        state.store(&ctx, egui::Id::new(MESSAGE_EDIT_ID));
+        clear_message_editor(&ctx);
+        let state = TextEditState::load(&ctx, egui::Id::new(MESSAGE_EDIT_ID)).unwrap();
+        let mut undoer = state.undoer();
+        assert!(undoer.undo(&empty).is_none());
+        assert!(undoer.redo(&empty).is_none());
+    }
 
     #[test]
     fn no_meter_timer_when_idle_muted_deafened_minimized_or_hidden() {
