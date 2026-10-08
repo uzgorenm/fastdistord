@@ -1,14 +1,104 @@
 //! OS-backed optional storage; no plaintext credential file fallback.
-use anyhow::{Result, bail};
+use anyhow::Result;
+#[cfg(any(not(target_os = "macos"), test))]
+use anyhow::bail;
 #[cfg(target_os = "macos")]
 const SERVICE: &str = "fastdistord.personal-account";
 #[cfg(target_os = "macos")]
 const ACCOUNT: &str = "default";
+#[cfg(any(target_os = "macos", test))]
+fn keychain_error(action: &str, code: i32) -> anyhow::Error {
+    let reason = match code {
+        -25300 => "no saved login was found",
+        -128 => "access was canceled",
+        -25293 => "access was denied or authentication failed",
+        -25308 => "Keychain is locked or requires your approval",
+        -25291 => "Keychain is unavailable",
+        _ => "Keychain operation failed",
+    };
+    anyhow::anyhow!(
+        "Could not {action}: {reason} (macOS status {code}). Approve the app's Keychain prompt yourself or unlock your login Keychain, then use Connect from Keychain. Do not delete a valid saved login."
+    )
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preference {
+    Unset,
+    Remembered,
+    Disabled,
+    Unavailable,
+}
+fn preference_from(bytes: Option<&[u8]>) -> Preference {
+    match bytes {
+        None => Preference::Unset,
+        Some(b"remember-v1\n") => Preference::Remembered,
+        Some(b"session-only-v1\n") => Preference::Disabled,
+        Some(_) => Preference::Unavailable,
+    }
+}
+pub fn preference() -> Preference {
+    let Some(path) = preference_path() else {
+        return Preference::Disabled;
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => preference_from(Some(&bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Preference::Unset,
+        Err(_) => Preference::Unavailable,
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    Found,
+    Missing,
+    Unavailable(i32),
+}
+/// Attribute-only query. No password data, references or authentication UI requested.
+pub fn presence() -> Presence {
+    #[cfg(target_os = "macos")]
+    {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+        match ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(SERVICE)
+            .account(ACCOUNT)
+            .load_attributes(true)
+            .load_data(false)
+            .load_refs(false)
+            .skip_authenticated_items(true)
+            .limit(Limit::Max(1))
+            .search()
+        {
+            Ok(items) if !items.is_empty() => Presence::Found,
+            Ok(_) => Presence::Missing,
+            Err(e) if e.code() == -25300 => Presence::Missing,
+            Err(e) => Presence::Unavailable(e.code()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Presence::Missing
+    }
+}
+pub fn should_restore(preference: Preference, presence: Presence) -> bool {
+    preference == Preference::Remembered
+        || (preference == Preference::Unset && presence == Presence::Found)
+}
+pub fn storage_status() -> String {
+    let preference = preference();
+    let presence = presence();
+    format!(
+        "Backend: {} · startup preference: {preference:?} · saved login metadata: {presence:?}. Metadata lookup does not request password data; skipped protected items may appear absent.",
+        if cfg!(target_os = "macos") {
+            "macOS Security framework Keychain"
+        } else {
+            "session only"
+        }
+    )
+}
 pub fn store(token: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, token.as_bytes())
-            .map_err(|_| anyhow::anyhow!("Could not save credential in macOS Keychain"))
+            .map_err(|e| keychain_error("save login", e.code()))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -21,9 +111,8 @@ pub fn load() -> Result<String> {
     #[cfg(target_os = "macos")]
     {
         let bytes = zeroize::Zeroizing::new(
-            security_framework::passwords::get_generic_password(SERVICE, ACCOUNT).map_err(
-                |_| anyhow::anyhow!("No saved credential is available in macOS Keychain"),
-            )?,
+            security_framework::passwords::get_generic_password(SERVICE, ACCOUNT)
+                .map_err(|e| keychain_error("load saved login", e.code()))?,
         );
         std::str::from_utf8(&bytes)
             .map(str::to_owned)
@@ -40,7 +129,7 @@ pub fn forget() -> Result<()> {
         match security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == -25300 => Ok(()),
-            Err(_) => bail!("Could not remove saved credential from macOS Keychain"),
+            Err(e) => Err(keychain_error("remove saved login", e.code())),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -64,9 +153,10 @@ fn preference_path() -> Option<std::path::PathBuf> {
     }
 }
 pub fn remembered() -> bool {
-    preference_path()
-        .and_then(|p| std::fs::read(p).ok())
-        .is_some_and(|v| v == b"remember-v1\n")
+    preference() == Preference::Remembered
+}
+pub fn enable_startup() -> Result<()> {
+    set_remembered(true)
 }
 fn set_remembered(enabled: bool) -> Result<()> {
     let path =
@@ -74,21 +164,28 @@ fn set_remembered(enabled: bool) -> Result<()> {
     write_preference(&path, enabled)
 }
 fn write_preference(path: &std::path::Path, enabled: bool) -> Result<()> {
-    if enabled {
-        std::fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| anyhow::anyhow!("Login preference location unavailable"))?,
-        )
-        .map_err(|_| anyhow::anyhow!("Could not save Remember me preference"))?;
-        std::fs::write(path, b"remember-v1\n")
-            .map_err(|_| anyhow::anyhow!("Could not save Remember me preference"))?;
-    } else {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => bail!("Could not disable automatic login preference"),
-        }
-    }
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| anyhow::anyhow!("Login preference location unavailable"))?,
+    )
+    .map_err(|_| anyhow::anyhow!("Could not save Remember me preference"))?;
+    // Atomic replacement: a partial write cannot turn a valid opt-in into an absent file.
+    let temporary = path.with_extension("pending");
+    std::fs::write(
+        &temporary,
+        if enabled {
+            b"remember-v1\n".as_slice()
+        } else {
+            b"session-only-v1\n".as_slice()
+        },
+    )
+    .map_err(|_| anyhow::anyhow!("Could not save Remember me preference"))?;
+    let file = std::fs::File::open(&temporary)
+        .map_err(|_| anyhow::anyhow!("Could not flush Remember me preference"))?;
+    file.sync_all()
+        .map_err(|_| anyhow::anyhow!("Could not flush Remember me preference"))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|_| anyhow::anyhow!("Could not commit Remember me preference"))?;
     Ok(())
 }
 fn save_with(
@@ -129,6 +226,39 @@ pub fn sign_out() -> Result<()> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[test]
+    fn legacy_remembered_items_restore_but_explicit_session_only_never_migrates() {
+        assert!(should_restore(Preference::Unset, Presence::Found));
+        assert!(!should_restore(Preference::Disabled, Presence::Found));
+        assert!(!should_restore(Preference::Unset, Presence::Missing));
+        assert!(!should_restore(Preference::Unavailable, Presence::Found));
+        assert!(should_restore(
+            Preference::Remembered,
+            Presence::Unavailable(-25308)
+        ));
+        assert_eq!(preference_from(None), Preference::Unset);
+        assert_eq!(
+            preference_from(Some(b"session-only-v1\n")),
+            Preference::Disabled
+        );
+        assert_eq!(
+            preference_from(Some(b"remember-v1\n")),
+            Preference::Remembered
+        );
+    }
+    #[test]
+    fn load_errors_distinguish_absence_denial_and_cancellation_without_secret_values() {
+        for (code, reason) in [
+            (-25300, "no saved login"),
+            (-128, "canceled"),
+            (-25293, "denied"),
+            (-25308, "locked"),
+        ] {
+            let text = keychain_error("load saved login", code).to_string();
+            assert!(text.contains(reason));
+            assert!(text.contains(&format!("status {code}")));
+        }
+    }
     #[test]
     fn remembered_lifecycle_survives_quit_and_explicit_logout_clears() {
         let secret = RefCell::new(None);
@@ -196,7 +326,8 @@ mod tests {
         write_preference(&path, true).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"remember-v1\n");
         write_preference(&path, false).unwrap();
-        assert!(!path.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"session-only-v1\n");
+        std::fs::remove_file(&path).unwrap();
         assert!(save_with("synthetic-only", |_| Ok(()), |_| bail!("preference denied")).is_err());
     }
 }

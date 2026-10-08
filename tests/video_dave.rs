@@ -6,6 +6,7 @@ use std::num::NonZeroU16;
 use davey::{DaveSession, MediaType, ProposalsOperationType};
 use fastdistord::video::{EncodedVideoFrame, VideoAuthority, VideoCodec};
 use openmls::prelude::*;
+use openmls::treesync::LeafNodeSource;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use tls_codec::{DeserializeBytes, Serialize};
@@ -567,7 +568,7 @@ fn synthetic_encrypted_video_over_loopback_udp() {
 }
 
 #[test]
-fn reported_initial_order_sends_valid_mls_envelope_and_preserves_key_for_welcome() {
+fn reported_initial_order_matches_bare_package_send_contract_and_preserves_welcome_key() {
     let version = NonZeroU16::new(1).unwrap();
     let trace = songbird::DaveHandshake::default();
     trace.set_enabled(true);
@@ -576,30 +577,25 @@ fn reported_initial_order_sends_valid_mls_envelope_and_preserves_key_for_welcome
     trace.record(songbird::DaveStage::Protocol, 1);
     let mut pending = DaveSession::new(version, 202, 303, None).unwrap();
     let raw = pending.create_key_package().unwrap();
-    // Reproduces the prior frame: opcode followed by bare KeyPackage fails MLSMessage parsing.
-    assert!(MlsMessageIn::tls_deserialize_exact_bytes(&raw).is_err());
+    // libdave ExternalSender::ProposeAdd consumes a bare KeyPackage, while
+    // discord.js prepends only opcode 26 to Davey's unchanged package.
     let frame = songbird::key_package_frame(&raw);
-    assert_eq!(&frame[..5], &[26, 0, 1, 0, 5]);
-    let parsed = MlsMessageIn::tls_deserialize_exact_bytes(&frame[1..]).unwrap();
-    let MlsMessageBodyIn::KeyPackage(package) = parsed.extract() else {
-        panic!("Expected key package envelope");
-    };
-    let package = package
+    assert!(frame.len() == raw.len() + 1 && frame[0] == 26 && frame[1..] == raw);
+    let package = KeyPackageIn::tls_deserialize_exact_bytes(&frame[1..])
+        .unwrap()
         .validate(
             OpenMlsRustCrypto::default().crypto(),
             ProtocolVersion::Mls10,
         )
         .unwrap();
-    assert_eq!(
-        frame,
-        [
-            vec![26],
-            MlsMessageOut::from(package.clone())
-                .tls_serialize_detached()
-                .unwrap()
-        ]
-        .concat()
-    );
+    assert!(package.ciphersuite() == pending.ciphersuite());
+    assert!(package.ciphersuite().tls_serialize_detached().unwrap() == [0, 2]);
+    assert!(package.leaf_node().credential().credential_type() == CredentialType::Basic);
+    assert!(package.leaf_node().credential().serialized_content() == 202u64.to_be_bytes());
+    let LeafNodeSource::KeyPackage(lifetime) = package.leaf_node().leaf_node_source() else {
+        panic!("Expected key package lifetime");
+    };
+    assert!(lifetime.not_before() == 0 && lifetime.not_after() == u64::MAX);
     trace.record(songbird::DaveStage::KeyPackage, 26);
     trace.record(songbird::DaveStage::Peers, 2);
     let mut creator = DaveSession::new(version, 101, 303, None).unwrap();
@@ -639,10 +635,17 @@ fn reported_initial_order_sends_valid_mls_envelope_and_preserves_key_for_welcome
         .process_welcome(candidate.welcome.as_ref().unwrap())
         .unwrap();
     assert!(pending.is_ready() && creator.is_ready());
-    let audio = pending.encrypt_opus(&[0xf8, 0xff, 0xfe]).unwrap();
+    // Synthetic encoded bytes, deliberately different from the special F8FFFE
+    // silence packet. This checks DAVE encryption/authentication, not Opus playback.
+    let encoded = [0xf8, 0x01, 0x02, 0x03, 0x04];
+    let audio = pending.encrypt_opus(&encoded).unwrap();
+    assert!(audio.as_ref() != encoded);
+    let mut tampered = audio.to_vec();
+    tampered[1] ^= 1;
+    assert!(creator.decrypt(202, MediaType::AUDIO, &tampered).is_err());
     assert_eq!(
         creator.decrypt(202, MediaType::AUDIO, &audio).unwrap(),
-        vec![0xf8, 0xff, 0xfe]
+        encoded
     );
     assert!(trace.trace().contains("KeyPackage 26"));
 }
@@ -729,4 +732,47 @@ fn reset_invalidates_old_package_and_fresh_package_can_be_welcomed() {
     assert!(!pending.is_ready());
     pending.process_welcome(&make_welcome(&fresh)).unwrap();
     assert!(pending.is_ready());
+}
+
+#[test]
+fn json_receive_trace_retains_only_opcode_length_and_outcome() {
+    let trace = songbird::DaveHandshake::default();
+    trace.set_enabled(true);
+    assert!(
+        songbird::decode_dave_json(r#"{"op":11,"d":{"user_ids":["101","202"]}}"#, &trace).is_ok()
+    );
+    assert!(
+        songbird::decode_dave_json(
+            r#"{"op":999,"d":{"token":"synthetic-private-data"}}"#,
+            &trace
+        )
+        .is_err()
+    );
+    let exported = trace.trace();
+    assert!(exported.contains("JsonDecoded 11"));
+    assert!(exported.contains("JsonDecodeFailed 999"));
+    assert!(
+        !exported.contains("synthetic-private-data")
+            && !exported.contains("user_ids")
+            && !exported.contains("token")
+    );
+}
+
+#[test]
+fn optional_json_envelope_fields_do_not_drop_membership_or_heartbeat() {
+    let trace = songbird::DaveHandshake::default();
+    trace.set_enabled(true);
+    let clients = r#"{"s":10,"op":11,"d":{"user_ids":["101","202"]},"extra":{"token":"synthetic-private-data"}}"#;
+    assert!(serde_json::from_str::<songbird::model::Event>(clients).is_err());
+    assert!(matches!(
+        songbird::decode_dave_json(clients, &trace).unwrap(),
+        songbird::model::Event::ClientsConnect(_)
+    ));
+    for heartbeat in [r#"{"op":6,"d":1,"s":11}"#, r#"{"d":1,"op":6,"s":11}"#] {
+        assert!(matches!(
+            songbird::decode_dave_json(heartbeat, &trace).unwrap(),
+            songbird::model::Event::HeartbeatAck(_)
+        ));
+    }
+    assert!(!trace.trace().contains("synthetic-private-data"));
 }

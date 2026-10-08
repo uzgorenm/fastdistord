@@ -19,8 +19,20 @@ fn main() -> anyhow::Result<()> {
         println!("fastdistord {}", fastdistord::RELEASE_VERSION);
         return Ok(());
     }
+    if std::env::args().any(|arg| arg == "--build-info") {
+        println!(
+            "fastdistord {} · build {}",
+            fastdistord::RELEASE_VERSION,
+            option_env!("FASTDISTORD_BUILD_COMMIT").unwrap_or("development")
+        );
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--microphone-status") {
         println!("{}", microphone::status().label());
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--login-storage-status") {
+        println!("{}", credential::storage_status());
         return Ok(());
     }
     let state = std::sync::Arc::new(std::sync::Mutex::new(model::UiState::default()));
@@ -28,7 +40,7 @@ fn main() -> anyhow::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = runtime::spawn(state.clone(), rx, gate.clone());
     #[cfg(target_os = "macos")]
-    if credential::remembered() {
+    if credential::should_restore(credential::preference(), credential::presence()) {
         // Explicit prior Remember me consent. One attempt per launch, no voice join.
         let _ = tx.send(model::Command::ConnectSaved {
             risk_accepted: true,

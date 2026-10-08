@@ -2,6 +2,10 @@
 
 [Back to README](../README.md) · [Setup](GETTING_STARTED.md) · [Verification](VERIFICATION.md)
 
+Use `open dist/latest/Fastdistord.app` after a local bundle build. Settings shows the source commit so you can identify the running build.
+
+Remember me saves to macOS Keychain after a successful login. Quit preserves it; startup restores it without joining voice. Existing saved entries can migrate when no preference exists. An explicit session-only login or Logout prevents startup restore. Storage errors appear in the app; approve its macOS Keychain prompt when needed. The ad-hoc signature can cause another prompt after an update. No password is stored in the preference file.
+
 ## Everyday controls
 
 | Control | Behavior |
@@ -51,7 +55,7 @@ On macOS, Settings reports the native microphone authorization status. An explic
 - **Account denied:** the unofficial adapter may not be accepted for your account. No MFA/CAPTCHA/protection bypass is provided. Do not repeatedly retry; use official Discord if this route is unavailable.
 - **Rate limited:** stop and wait before retrying. There is no automatic bypass or alternate account attempt.
 - **Joined · encryption pending:** a confirmed sole participant can stay joined while waiting for the MLS group exchange. Voice audio streams remain closed; optional local feedback can use the speaker. When a peer joins, DAVE must finish before audio opens. An unknown roster, peer handshake stall or MLS failure still has a bounded timeout.
-- In Settings, enable **Record redacted voice handshake trace** before a test join, then use **Copy handshake trace** to report a failure. This memory-only trace contains typed stages, timings, protocol versions, participant counts and transition IDs; no credentials, user IDs, keys or packet payloads. Disabling it clears the retained trace.
+- In Settings, enable **Record redacted voice handshake trace** before a test join, then use **Copy handshake trace** to report a failure. This memory-only trace contains typed stages, timings, protocol versions, participant counts, initial roster, JSON/binary decode outcomes, socket close codes and transition IDs; no credentials, user IDs, keys or packet payloads. Disabling it clears the retained trace.
 - **Microphone or speaker unavailable:** recovery retries the same authorized device IDs; it does not fall back to a different microphone or speaker. Check OS permissions, connected devices and selected route. On macOS, launch the `.app` containing its microphone usage description. Leave, select a valid device and rejoin.
 - **Silent while PTT is enabled:** both explicit unmute and a held talk control are necessary. Server mute/deafen/suppression remains authoritative.
 - **Moved, kicked, or permissions changed:** audio stops. Check access and explicitly choose/join a channel; the app does not undo the server action.

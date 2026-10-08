@@ -310,14 +310,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         remember,
                     } => {
                         remembered_session = false;
-                        let outcome = crate::credential::disable_startup();
                         update(&state, &repaint, |s| {
-                            s.login_storage_status = if outcome.is_err() {
-                                "Could not disable previous automatic login; use Log out & forget credential.".into()
-                            } else if remember {
-                                "Remember me will save only after successful login.".into()
+                            s.login_storage_status = if remember {
+                                "Checking login; existing remembered access is preserved until this login succeeds.".into()
                             } else {
-                                "Session only; automatic login disabled.".into()
+                                "Session-only login will disable automatic login after successful authentication.".into()
                             };
                         });
                         reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
@@ -405,9 +402,10 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                     s.status = "Connecting with saved credential…".into();
                                 });
                             }
-                            Err(error) => {
-                                update(&state, &repaint, |s| s.status = error.to_string())
-                            }
+                            Err(error) => update(&state, &repaint, |s| {
+                                s.status = error.to_string();
+                                s.login_storage_status = error.to_string();
+                            }),
                         }
                     }
                     Command::Reconnect => {
@@ -1071,6 +1069,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 Some(ResultEvent::Account(id, result, saved, from_saved)) if id == generation => {
                     match result {
                         Ok((c, a, guilds)) => {
+                            let save_requested = saved.is_some();
                             if let Some(secret) = saved {
                                 let outcome = crate::credential::remember(&secret);
                                 remembered_session = outcome.is_ok();
@@ -1078,13 +1077,34 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                     s.login_storage_status = if outcome.is_ok() {
                                         "Remembered in macOS Keychain; reconnects on launch. Quit preserves login.".into()
                                     } else {
-                                        "Login connected, but Remember me failed. Check Keychain access and sign in again with Remember me; this session remains usable.".into()
+                                        format!(
+                                            "Connected for this launch, but Remember me was not enabled: {}",
+                                            outcome
+                                                .err()
+                                                .map_or_else(String::new, |e| e.to_string())
+                                        )
                                     }
                                 });
                             } else if from_saved {
                                 remembered_session = true;
+                                let enabled = crate::credential::enable_startup();
                                 update(&state, &repaint, |s| {
-                                    s.login_storage_status = "Connected using macOS Keychain. Quit preserves login; Log out forgets it.".into()
+                                    s.login_storage_status = if enabled.is_ok() {
+                                        "Connected using macOS Keychain. Remembered for future launches; Quit preserves login.".into()
+                                    } else {
+                                        "Connected using Keychain, but startup preference could not be saved. Use Connect from Keychain on next launch.".into()
+                                    };
+                                });
+                            }
+                            if !remembered_session && !from_saved && !save_requested {
+                                let disabled = crate::credential::disable_startup();
+                                update(&state, &repaint, |s| {
+                                    s.login_storage_status = if disabled.is_ok() {
+                                        "Connected for this launch only; automatic login disabled."
+                                            .into()
+                                    } else {
+                                        "Connected for this launch only, but automatic login preference could not be disabled. Use Log out & forget credential.".into()
+                                    }
                                 });
                             }
                             signal_ready = false;

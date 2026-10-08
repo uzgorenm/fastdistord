@@ -59,7 +59,7 @@ To create and open an Apple Silicon app bundle, run on macOS with Xcode command-
 ```sh
 rustup target add aarch64-apple-darwin
 ./scripts/bundle-macos.sh
-open dist/Fastdistord.app
+open dist/latest/Fastdistord.app
 ```
 
 See [Packaging](PACKAGING.md) for bundle details.

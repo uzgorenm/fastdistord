@@ -20,6 +20,14 @@ pub enum DaveStage {
     BinaryDecoded,
     /// Binary decoding failed; value is a local error category.
     BinaryDecodeFailed,
+    /// JSON frame received; value is its numeric opcode or u16::MAX when unavailable.
+    JsonReceived,
+    /// JSON frame length, capped at u16::MAX.
+    JsonLength,
+    /// JSON event decoded successfully.
+    JsonDecoded,
+    /// Socket closed; value is the public close code.
+    SocketClosed,
     /// JSON event decoding failed; no payload retained.
     JsonDecodeFailed,
     /// Key package sent (no package bytes retained).
@@ -46,6 +54,8 @@ pub enum DaveStage {
     Epoch,
     /// MLS processing failed (no error payload retained).
     MlsFailed,
+    /// Authoritative account roster count; u16::MAX means unknown.
+    Roster,
     /// Known voice participant count changed.
     Peers,
     /// Negotiated media readiness changed.
@@ -107,11 +117,28 @@ impl DaveHandshake {
                 ready: false,
                 failed: false,
             };
+            if s.enabled {
+                let count = s
+                    .roster
+                    .map_or(u16::MAX, |n| n.min((u16::MAX - 1) as usize) as u16);
+                s.trace.push_back((0, DaveStage::Roster, count));
+            }
         }
     }
     /// Authoritative account Gateway voice roster count, or unknown when incomplete.
     pub fn set_roster_count(&self, count: Option<usize>) {
         if let Ok(mut s) = self.0.lock() {
+            if s.roster != count && s.enabled {
+                if s.trace.len() == 64 {
+                    s.trace.pop_front();
+                }
+                let elapsed = s.start.elapsed().as_millis();
+                s.trace.push_back((
+                    elapsed,
+                    DaveStage::Roster,
+                    count.map_or(u16::MAX, |n| n.min((u16::MAX - 1) as usize) as u16),
+                ));
+            }
             s.roster = count;
         }
     }
@@ -262,7 +289,9 @@ mod tests {
         }
         assert_eq!(state.trace().lines().count(), 64);
         state.begin();
-        assert!(state.enabled() && state.trace().is_empty());
+        assert!(state.enabled());
+        assert_eq!(state.trace().lines().count(), 1);
+        assert!(state.trace().contains("Roster 65535"));
         state.record(DaveStage::Connected, 0);
         state.set_enabled(false);
         assert!(state.trace().is_empty());

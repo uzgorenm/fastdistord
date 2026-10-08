@@ -388,6 +388,13 @@ impl VoiceApp {
     }
 
     fn header(&mut self, ui: &mut egui::Ui, state: &UiState) {
+        if !state.login_storage_status.is_empty() && state.account.is_some() {
+            ui.label(
+                RichText::new(&state.login_storage_status)
+                    .size(11.0)
+                    .color(theme::SECONDARY),
+            );
+        }
         self.images
             .sync(state.account.as_ref().map(|a| a.id), ui.ctx());
         ui.horizontal(|ui| {
@@ -1332,6 +1339,7 @@ impl VoiceApp {
                 let mut sound_volume = state.sound_volume;
                 if ui.add_enabled(call_sounds, egui::Slider::new(&mut sound_volume, 0.0..=1.0).text("Call sound volume")).changed() { self.send(Command::SetSoundVolume(sound_volume)); }
                 if let Some(error) = &self.sound_error { ui.label(RichText::new(error).size(12.0).color(theme::DANGER)); }
+                ui.label(format!("Build {}", option_env!("FASTDISTORD_BUILD_COMMIT").unwrap_or("development")));
                 ui.label(state.microphone_permission.label());
                 if !state.login_storage_status.is_empty() { ui.label(&state.login_storage_status); }
                 if matches!(state.microphone_permission, crate::microphone::Permission::Denied | crate::microphone::Permission::Restricted) {

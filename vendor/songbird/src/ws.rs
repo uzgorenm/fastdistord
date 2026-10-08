@@ -146,17 +146,13 @@ pub(crate) fn convert_ws_message(
     #[cfg(feature = "tungstenite")]
     match message {
         Some(Message::Text(ref payload)) => {
-            return Ok(serde_json::from_str(payload)
-                .map_err(|e| {
-                    handshake.record(crate::DaveStage::JsonDecodeFailed, 0);
-                    e
-                })
-                .ok())
+            return Ok(crate::decode_dave_json(payload, handshake).ok());
         }
         Some(Message::Binary(bytes)) => {
             return Ok(crate::decode_dave_binary(&bytes, handshake).ok());
         }
         Some(Message::Close(Some(frame))) => {
+            handshake.record(crate::DaveStage::SocketClosed, u16::from(frame.code));
             return Err(Error::WsClosed(Some(frame)));
         }
         // Ping/Pong message behaviour is internally handled by tungstenite.
@@ -167,12 +163,7 @@ pub(crate) fn convert_ws_message(
     match message {
         Some(ref message) if message.is_text() => {
             return if let Some(text) = message.as_text() {
-                Ok(serde_json::from_str(text)
-                    .map_err(|e| {
-                        handshake.record(crate::DaveStage::JsonDecodeFailed, 0);
-                        e
-                    })
-                    .ok())
+                Ok(crate::decode_dave_json(text, handshake).ok())
             } else {
                 Ok(None)
             };

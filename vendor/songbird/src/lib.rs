@@ -83,7 +83,7 @@ mod config;
 #[cfg(feature = "driver")]
 mod dave_handshake;
 mod dave_wire;
-pub use dave_wire::{decode_dave_binary, key_package_frame};
+pub use dave_wire::{decode_dave_binary, decode_dave_json, key_package_frame};
 #[cfg(feature = "driver")]
 pub use dave_handshake::{DaveHandshake, DaveStage};
 pub mod constants;
