@@ -646,3 +646,87 @@ fn reported_initial_order_sends_valid_mls_envelope_and_preserves_key_for_welcome
     );
     assert!(trace.trace().contains("KeyPackage 26"));
 }
+
+#[test]
+fn v4_binary_decode_records_safe_headers_and_local_failures() {
+    let trace = songbird::DaveHandshake::default();
+    trace.set_enabled(true);
+    for frame in [
+        vec![25, 1, 2],
+        vec![27, 0, 0],
+        vec![29, 0, 1, 0],
+        vec![30, 0, 1, 0],
+    ] {
+        assert!(songbird::decode_dave_binary(&frame, &trace).is_ok());
+    }
+    for frame in [
+        vec![],
+        vec![27],
+        vec![27, 9],
+        vec![29, 0],
+        vec![30, 0],
+        vec![0, 1, 27, 0],
+    ] {
+        assert!(songbird::decode_dave_binary(&frame, &trace).is_err());
+    }
+    let exported = trace.trace();
+    for opcode in [25, 27, 29, 30] {
+        assert!(exported.contains(&format!("BinaryDecoded {opcode}")));
+    }
+    assert!(exported.contains("SequencedOpcode 27"));
+    assert!(exported.contains("BinaryDecodeFailed 1"));
+    assert!(exported.contains("BinaryDecodeFailed 2"));
+    assert!(exported.contains("BinaryDecodeFailed 3"));
+    assert!(!exported.contains("payload") && !exported.contains("data="));
+}
+
+#[test]
+fn reset_invalidates_old_package_and_fresh_package_can_be_welcomed() {
+    let version = NonZeroU16::new(1).unwrap();
+    let mut pending = DaveSession::new(version, 202, 303, None).unwrap();
+    let old = pending.create_key_package().unwrap();
+    let sender = SignatureKeyPair::new(pending.ciphersuite().signature_algorithm()).unwrap();
+    let external = ExternalSender::new(
+        sender.public().into(),
+        BasicCredential::new(b"offline-delivery-fixture".to_vec()).into(),
+    )
+    .tls_serialize_detached()
+    .unwrap();
+    pending.set_external_sender(&external).unwrap();
+    pending.reinit(version, 202, 303, None).unwrap();
+    let fresh = pending.create_key_package().unwrap();
+    let make_welcome = |package: &[u8]| {
+        let mut creator = DaveSession::new(version, 101, 303, None).unwrap();
+        creator.set_external_sender(&external).unwrap();
+        let package = KeyPackageIn::tls_deserialize_exact_bytes(package)
+            .unwrap()
+            .validate(
+                OpenMlsRustCrypto::default().crypto(),
+                ProtocolVersion::Mls10,
+            )
+            .unwrap();
+        let proposal = ExternalProposal::new_add::<OpenMlsRustCrypto>(
+            package,
+            creator.group().unwrap().group_id().clone(),
+            creator.epoch().unwrap(),
+            &sender,
+            SenderExtensionIndex::new(0),
+        )
+        .unwrap()
+        .tls_serialize_detached()
+        .unwrap();
+        let candidate = creator
+            .process_proposals(
+                ProposalsOperationType::APPEND,
+                &VLBytes::new(proposal).tls_serialize_detached().unwrap(),
+                Some(&[101, 202]),
+            )
+            .unwrap()
+            .unwrap();
+        candidate.welcome.unwrap()
+    };
+    assert!(pending.process_welcome(&make_welcome(&old)).is_err());
+    assert!(!pending.is_ready());
+    pending.process_welcome(&make_welcome(&fresh)).unwrap();
+    assert!(pending.is_ready());
+}

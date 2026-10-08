@@ -1,7 +1,4 @@
-use crate::{
-    error::JsonError,
-    model::{deserialize_binary_event, Event},
-};
+use crate::{error::JsonError, model::Event};
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt, TryStreamExt};
@@ -141,42 +138,6 @@ impl From<BinaryError> for Error {
     }
 }
 
-fn decode_binary(
-    bytes: &[u8],
-    handshake: &crate::DaveHandshake,
-) -> std::result::Result<Event, BinaryError> {
-    let opcode = bytes
-        .first()
-        .copied()
-        .filter(|op| matches!(op, 25 | 27 | 29 | 30))
-        .unwrap_or(0);
-    handshake.record(crate::DaveStage::BinaryReceived, u16::from(opcode));
-    handshake.record(
-        crate::DaveStage::BinaryLength,
-        bytes.len().min(u16::MAX as usize) as u16,
-    );
-    if let Some(opcode) = bytes
-        .get(2)
-        .copied()
-        .filter(|op| opcode == 0 && matches!(op, 25 | 27 | 29 | 30))
-    {
-        handshake.record(crate::DaveStage::SequencedOpcode, u16::from(opcode));
-    }
-    let result = deserialize_binary_event(bytes);
-    match &result {
-        Ok(_) => handshake.record(crate::DaveStage::BinaryDecoded, u16::from(opcode)),
-        Err(error) => handshake.record(
-            crate::DaveStage::BinaryDecodeFailed,
-            match error {
-                BinaryError::InsufficientData => 1,
-                BinaryError::InvalidOpcode(_) => 2,
-                BinaryError::InvalidOperationType(_) => 3,
-                BinaryError::ParseError(_) => 4,
-            },
-        ),
-    }
-    result
-}
 #[inline]
 pub(crate) fn convert_ws_message(
     message: Option<Message>,
@@ -193,7 +154,7 @@ pub(crate) fn convert_ws_message(
                 .ok())
         }
         Some(Message::Binary(bytes)) => {
-            return Ok(decode_binary(&bytes, handshake).ok());
+            return Ok(crate::decode_dave_binary(&bytes, handshake).ok());
         }
         Some(Message::Close(Some(frame))) => {
             return Err(Error::WsClosed(Some(frame)));
@@ -217,7 +178,7 @@ pub(crate) fn convert_ws_message(
             };
         }
         Some(message) if message.is_binary() => {
-            return Ok(decode_binary(&message.into_payload(), handshake).ok());
+            return Ok(crate::decode_dave_binary(&message.into_payload(), handshake).ok());
         }
         Some(message) if message.is_close() => {
             return Err(Error::WsClosed(message.as_close().map(|(c, _)| c)));
