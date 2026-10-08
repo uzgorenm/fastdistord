@@ -412,6 +412,19 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                     Ok(c) => c.clone(),
                     Err(_) => break,
                 };
+                if let Err(error) = crate::microphone::request_for_join().await {
+                    let _ = events.send(TransportEvent::Disconnected {
+                        message: error.to_string(),
+                        retryable: false,
+                    });
+                    break;
+                }
+                if gate.session() != expected_session
+                    || !alive.load(Ordering::Acquire)
+                    || !dave_ready.load(Ordering::Acquire)
+                {
+                    continue;
+                }
                 let engine = match AudioEngine::start(config, gate.clone()) {
                     Ok(engine) => Arc::new(engine),
                     Err(_) => {

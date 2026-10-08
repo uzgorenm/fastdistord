@@ -149,6 +149,18 @@ impl PersonalAccount {
         .await?;
         Ok(())
     }
+    /// One best-effort cancellation of the recipients of our explicit call.
+    pub async fn stop_ringing(&self, channel_id: u64, recipient_ids: &[u64]) -> Result<()> {
+        messaging::validate_id(channel_id)?;
+        let recipients = ring_payload(recipient_ids)?;
+        self.request(
+            reqwest::Method::POST,
+            &format!("/channels/{channel_id}/call/stop-ringing"),
+            Some(recipients),
+        )
+        .await?;
+        Ok(())
+    }
     pub async fn text_channels(&self, guild_id: u64) -> Result<Vec<TextChannel>> {
         messaging::validate_id(guild_id)?;
         let value = self.get(&format!("/guilds/{guild_id}/channels")).await?;

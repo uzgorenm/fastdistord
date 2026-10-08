@@ -19,6 +19,7 @@ type Repaint = Option<Arc<dyn Fn() + Send + Sync>>;
 fn update(state: &Shared, repaint: &Repaint, f: impl FnOnce(&mut UiState)) {
     if let Ok(mut s) = state.lock() {
         f(&mut s);
+        crate::calls::refresh(&mut s);
         s.revision = s.revision.wrapping_add(1);
     }
     if let Some(wake) = repaint {
@@ -63,6 +64,7 @@ enum ResultEvent {
     ),
     OpenedDm(u64, u64, Result<crate::social::DirectChannel>),
     Ring(u64, Result<()>),
+    StoppedRing(u64, u64, bool),
     Channels(u64, u64, Result<Vec<Channel>>),
     TextChannels(u64, u64, u64, Result<Vec<crate::messaging::TextChannel>>),
     Messages(u64, u64, u64, Result<Vec<crate::messaging::ChatMessage>>),
@@ -247,8 +249,34 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         | Command::Reconnect
                         | Command::Quit
                 ) {
+                    let may_have_rung = ring_task.is_some();
                     if let Some(task) = ring_task.take() {
                         task.abort();
+                    }
+                    let old = snapshot(&state);
+                    if let (Some(c), Some(call)) = (client.clone(), old.current_call.as_ref())
+                        && call.private
+                        && (may_have_rung || call.ring_requested || call.ringing)
+                        && let Some(dm) = old
+                            .direct_channels
+                            .iter()
+                            .find(|d| d.id == call.channel && d.recipients.len() == 1)
+                    {
+                        let channel = call.channel;
+                        let recipients = dm.recipients.iter().map(|u| u.id).collect::<Vec<_>>();
+                        let tx = results_tx.clone();
+                        let account_scope = generation;
+                        tokio::spawn(async move {
+                            let outcome = tokio::time::timeout(
+                                Duration::from_secs(2),
+                                c.stop_ringing(channel, &recipients),
+                            )
+                            .await;
+                            let failed = !matches!(outcome, Ok(Ok(())));
+                            let _ = tx
+                                .send(ResultEvent::StoppedRing(account_scope, channel, failed))
+                                .await;
+                        });
                     }
                     recovery.revoke();
                     signal_retry = None;
@@ -263,6 +291,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     signal_resume = None;
                     signal_deadline = None;
                     signal_budget = RetryBudget::default();
+                }
+                if matches!(&command, Command::RefreshDevices) {
+                    update(&state, &repaint, |s| {
+                        s.microphone_permission = crate::microphone::status()
+                    });
                 }
                 match command {
                     Command::SetUiRepaint(callback) => {
@@ -296,6 +329,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.status = "Checking account access…".into();
                             s.account = None;
                             s.profiles.clear();
+                            s.current_call = None;
+                            s.call_events.clear();
                             s.friends.clear();
                             s.direct_channels.clear();
                             s.social_status.clear();
@@ -635,6 +670,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             task.abort();
                         }
                         server_suppressed = false;
+                        gate.set_remote_muted(true);
+                        gate.set_deafened(true);
                         pending = Some(PendingVoice {
                             guild: guild_id,
                             roster_complete: complete_rosters.contains(&guild_id),
@@ -645,6 +682,18 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         });
                         update(&state, &repaint, |s| {
                             s.phase = Phase::Joining;
+                            s.microphone_permission = crate::microphone::status();
+                            s.confirmed_muted = None;
+                            s.confirmed_deafened = None;
+                            s.server_deafened = false;
+                            s.server_suppressed = false;
+                            let target = s
+                                .channels
+                                .iter()
+                                .find(|c| c.id == channel_id)
+                                .map(|c| c.name.clone())
+                                .unwrap_or_else(|| "Voice channel".into());
+                            crate::calls::start(s, channel_id, false, target);
                             s.status = "Joining encrypted voice…".into();
                             s.selected_channel = Some(channel_id);
                             s.selected_call_dm = None;
@@ -662,7 +711,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 .send(GatewayCommand::Voice {
                                     guild_id,
                                     channel_id: Some(channel_id),
-                                    muted: s.muted,
+                                    muted: true,
                                     deafened: s.deafened,
                                 })
                                 .await;
@@ -693,6 +742,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             &mut voice_task,
                         );
                         server_suppressed = false;
+                        gate.set_remote_muted(true);
+                        gate.set_deafened(true);
                         pending = Some(PendingVoice {
                             guild: channel_id,
                             private: true,
@@ -703,6 +754,18 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         });
                         update(&state, &repaint, |s| {
                             s.phase = Phase::Joining;
+                            s.microphone_permission = crate::microphone::status();
+                            s.confirmed_muted = None;
+                            s.confirmed_deafened = None;
+                            s.server_deafened = false;
+                            s.server_suppressed = false;
+                            let target = s
+                                .direct_channels
+                                .iter()
+                                .find(|c| c.id == channel_id)
+                                .map(|c| c.name.clone())
+                                .unwrap_or_else(|| "Private call".into());
+                            crate::calls::start(s, channel_id, true, target);
                             s.status = "Connecting call…".into();
                             s.selected_channel = Some(channel_id);
                             s.selected_call_dm = Some(channel_id);
@@ -718,7 +781,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 .commands
                                 .send(GatewayCommand::PrivateVoice {
                                     channel_id: Some(channel_id),
-                                    muted: s.muted,
+                                    muted: true,
                                     deafened: s.deafened,
                                 })
                                 .await;
@@ -759,24 +822,34 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         if may_send_voice_flags(
                             signal_ready,
                             transport.is_some(),
-                            recovery.authorized(pending.as_ref()),
+                            voice_flags_authorized(&recovery, pending.as_ref()),
                         ) {
                             send_voice_flags(&gateway, &pending, &state).await;
                         }
                     }
                     Command::SetDeafened(value) => {
-                        gate.set_deafened(value);
+                        let s = snapshot(&state);
+                        let effective = value
+                            || s.server_deafened
+                            || (pending.is_some() && s.confirmed_deafened != Some(false));
+                        gate.set_deafened(effective);
                         if let Some(t) = &mut transport {
-                            t.deafen(value);
+                            t.deafen(effective);
                         }
                         update(&state, &repaint, |s| s.deafened = value);
                         if may_send_voice_flags(
                             signal_ready,
                             transport.is_some(),
-                            recovery.authorized(pending.as_ref()),
+                            voice_flags_authorized(&recovery, pending.as_ref()),
                         ) {
                             send_voice_flags(&gateway, &pending, &state).await;
                         }
+                    }
+                    Command::SetCallSounds(value) => {
+                        update(&state, &repaint, |s| s.call_sounds = value)
+                    }
+                    Command::SetSoundVolume(value) => {
+                        update(&state, &repaint, |s| s.sound_volume = value.clamp(0.0, 1.0))
                     }
                     Command::SetPtt(value) => {
                         gate.set_ptt_enabled(value);
@@ -881,9 +954,32 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }),
                     }
                 }
-                Some(ResultEvent::Ring(id, Err(error))) if id == join_generation => {
+                Some(ResultEvent::StoppedRing(id, channel, true))
+                    if id == generation && snapshot(&state).account.is_some() =>
+                {
                     update(&state, &repaint, |s| {
-                        s.status = format!("Call connected, but ringing failed: {error}")
+                        crate::calls::event(
+                            s,
+                            channel,
+                            "Remote ring cancellation was not confirmed",
+                        )
+                    });
+                }
+                Some(ResultEvent::Ring(id, result)) if id == join_generation => {
+                    ring_task.take();
+                    update(&state, &repaint, |s| match result {
+                        Ok(()) => {
+                            if let Some(call) = &mut s.current_call {
+                                call.ring_requested = true;
+                            }
+                        }
+                        Err(error) => {
+                            s.status =
+                                format!("Call transport connected, but ringing failed: {error}");
+                            if let Some(call) = &mut s.current_call {
+                                call.ringing = false;
+                            }
+                        }
                     });
                 }
                 Some(ResultEvent::TextChannels(id, request, guild, result))
@@ -1026,7 +1122,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                         let intended = snapshot(&state);
                         gate.set_muted(intended.muted);
-                        gate.set_deafened(intended.deafened);
+                        gate.set_deafened(
+                            intended.deafened
+                                || intended.server_deafened
+                                || intended.confirmed_deafened != Some(false),
+                        );
                         gate.set_ptt_enabled(intended.ptt_enabled);
                         gate.set_ptt_pressed(None);
                         gate.set_suppressed(server_suppressed);
@@ -1052,6 +1152,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             }
                         }
                         update(&state, &repaint, |s| {
+                            s.microphone_permission = crate::microphone::status();
                             s.phase = if ready {
                                 Phase::VoiceReady
                             } else {
@@ -1063,6 +1164,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 "Joined · waiting for encrypted voice; microphone closed".into()
                             };
                         });
+                        send_voice_flags(&gateway, &pending, &state).await;
                     }
                     Err(error) => {
                         retire_voice_attempt(id, &mut join_generation, &gate);
@@ -1138,6 +1240,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     });
                     signal_ready = false;
                     signal_deadline = None;
+                    gate.set_remote_muted(true);
+                    update(&state, &repaint, |s| {
+                        s.confirmed_muted = None;
+                        s.confirmed_deafened = None;
+                    });
                     gate.set_suppressed(true);
                     gate.set_ptt_pressed(None);
                     gate.begin_session();
@@ -1297,7 +1404,43 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                     && account::snowflake(&voice["channel_id"]) == Some(p.channel)
                                 {
                                     p.session = voice["session_id"].as_str().map(str::to_owned);
+                                    server_suppressed = apply_confirmed_voice_state(
+                                        &state,
+                                        &repaint,
+                                        &gate,
+                                        voice,
+                                        transport.is_some(),
+                                    );
                                 }
+                            }
+                        }
+                    }
+                    if matches!(kind.as_str(), "CALL_CREATE" | "CALL_UPDATE")
+                        && let Some(channel) = account::snowflake(&data["channel_id"])
+                    {
+                        let own = snapshot(&state).account.as_ref().map(|a| a.id);
+                        let ringing =
+                            data["ringing"]
+                                .as_array()
+                                .filter(|v| v.len() <= 25)
+                                .map(|v| {
+                                    v.iter()
+                                        .filter_map(account::snowflake)
+                                        .any(|id| Some(id) != own)
+                                });
+                        update(&state, &repaint, |s| {
+                            crate::calls::server_call(s, channel, ringing)
+                        });
+                        if snapshot(&state)
+                            .current_call
+                            .as_ref()
+                            .is_some_and(|call| call.channel == channel && call.peer_joined)
+                        {
+                            if let Some(p) = &mut pending {
+                                p.ring_pending = false;
+                            }
+                            if let Some(task) = ring_task.take() {
+                                task.abort();
                             }
                         }
                     }
@@ -1422,11 +1565,14 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                     continue;
                                 }
                                 p.session = incoming_session.map(str::to_owned);
-                                let admin_muted = data["mute"].as_bool().unwrap_or(false)
-                                    || data["deaf"].as_bool().unwrap_or(false)
-                                    || data["suppress"].as_bool().unwrap_or(false);
+                                let admin_muted = apply_confirmed_voice_state(
+                                    &state,
+                                    &repaint,
+                                    &gate,
+                                    &data,
+                                    transport.is_some(),
+                                );
                                 server_suppressed = admin_muted;
-                                gate.set_suppressed(admin_muted || transport.is_none());
                                 if admin_muted {
                                     update(&state, &repaint, |s| {
                                         s.status = "Server has muted or suppressed you.".into()
@@ -1489,6 +1635,28 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.status="Server permissions or channel configuration changed. Audio stopped; rejoin after checking access.".into();
                         });
                         pending = None;
+                    }
+                    if kind == "VOICE_STATE_UPDATE"
+                        && let Some(p) = pending.as_ref().filter(|p| p.private)
+                    {
+                        let channel = p.channel;
+                        update(&state, &repaint, |s| {
+                            if s.current_call.as_ref().is_some_and(|c| c.confirmed) {
+                                crate::calls::server_call(s, channel, None);
+                            }
+                        });
+                        if snapshot(&state)
+                            .current_call
+                            .as_ref()
+                            .is_some_and(|call| call.peer_joined)
+                        {
+                            if let Some(p) = &mut pending {
+                                p.ring_pending = false;
+                            }
+                            if let Some(task) = ring_task.take() {
+                                task.abort();
+                            }
+                        }
                     }
                     publish_roster_count(&state, pending.as_ref(), &roster);
                     if signal_ready
@@ -1563,10 +1731,12 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             recovery.config = Some(t.device_config());
                             gate.set_ptt_pressed(None);
                             update(&state, &repaint, |s| {
+                                s.microphone_permission = crate::microphone::status();
                                 s.phase = Phase::VoiceReady;
                                 s.status =
                                     "Encrypted voice connected · headphones recommended".into();
                             });
+                            send_voice_flags(&gateway, &pending, &state).await;
                         }
                     }
                     Some(TransportEvent::Waiting) => {
@@ -1575,6 +1745,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 s.phase = Phase::VoiceWaiting;
                                 s.status = "Joined · encryption pending; microphone closed".into();
                             });
+                            send_voice_flags(&gateway, &pending, &state).await;
                         }
                     }
                     Some(TransportEvent::Speaking { user_id, speaking }) => {
@@ -1585,6 +1756,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         })
                     }
                     Some(TransportEvent::Disconnected { message, retryable }) => {
+                        update(&state, &repaint, |s| {
+                            s.microphone_permission = crate::microphone::status()
+                        });
                         retire_voice_attempt(id, &mut join_generation, &gate);
                         transport.take();
                         if let Some(task) = voice_task.take() {
@@ -1613,14 +1787,18 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         });
                     }
                     Some(TransportEvent::DeviceFailure(message)) => {
+                        update(&state, &repaint, |s| {
+                            s.microphone_permission = crate::microphone::status()
+                        });
                         retire_voice_attempt(id, &mut join_generation, &gate);
                         transport.take();
                         if let Some(task) = voice_task.take() {
                             task.abort();
                         }
                         recovery.device_failure = true;
-                        let retrying =
-                            signal_ready && recovery.schedule(join_generation, pending.as_ref());
+                        let retrying = signal_ready
+                            && crate::microphone::status().usable()
+                            && recovery.schedule(join_generation, pending.as_ref());
                         if !retrying {
                             recovery.revoke();
                         }
@@ -1733,12 +1911,39 @@ fn retryable_connect_error(error: &anyhow::Error, device_episode: bool) -> bool 
     error.downcast_ref::<TransientVoiceFailure>().is_some()
         || (device_episode && error.downcast_ref::<AudioOpenFailure>().is_some())
 }
+fn voice_flags_authorized(recovery: &CallRecovery, pending: Option<&PendingVoice>) -> bool {
+    matches!((&recovery.info, pending), (Some(info), Some(p)) if info.guild_id == (!p.private).then_some(p.guild) && info.channel_id == p.channel && p.session.as_deref() == Some(info.session_id.as_str()))
+}
 fn may_send_voice_flags(
     signaling_ready: bool,
     voice_active: bool,
     authority_current: bool,
 ) -> bool {
     signaling_ready && voice_active && authority_current
+}
+fn apply_confirmed_voice_state(
+    state: &Shared,
+    repaint: &Repaint,
+    gate: &TxGate,
+    data: &serde_json::Value,
+    transport_present: bool,
+) -> bool {
+    let confirmed_mute = data["self_mute"].as_bool();
+    let confirmed_deaf = data["self_deaf"].as_bool();
+    let admin_deaf = data["deaf"].as_bool().unwrap_or(false);
+    let suppressed = data["mute"].as_bool().unwrap_or(false)
+        || admin_deaf
+        || data["suppress"].as_bool().unwrap_or(false);
+    gate.set_remote_muted(confirmed_mute != Some(false) || confirmed_deaf != Some(false));
+    gate.set_deafened(snapshot(state).deafened || confirmed_deaf != Some(false) || admin_deaf);
+    gate.set_suppressed(suppressed || !transport_present);
+    update(state, repaint, |s| {
+        s.confirmed_muted = confirmed_mute;
+        s.confirmed_deafened = confirmed_deaf;
+        s.server_suppressed = suppressed;
+        s.server_deafened = admin_deaf;
+    });
+    suppressed
 }
 fn publish_roster_count(
     state: &Shared,
@@ -1867,7 +2072,7 @@ async fn send_voice_flags(
             .send(voice_command(
                 p,
                 Some(p.channel),
-                s.muted || s.deafened,
+                crate::calls::gateway_mute(&s),
                 s.deafened,
             ))
             .await;
@@ -1940,6 +2145,56 @@ fn permission_event_affects_call(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn own_confirmed_mute_and_admin_deafen_close_capture_independently_of_intent() {
+        let state = Arc::new(Mutex::new(UiState {
+            phase: Phase::VoiceReady,
+            muted: false,
+            ..Default::default()
+        }));
+        let gate = TxGate::default();
+        gate.set_muted(false);
+        gate.set_suppressed(false);
+        apply_confirmed_voice_state(
+            &state,
+            &None,
+            &gate,
+            &json!({"self_mute":true,"self_deaf":false}),
+            true,
+        );
+        assert!(!gate.transmit_allowed());
+        assert!(!snapshot(&state).muted);
+        apply_confirmed_voice_state(
+            &state,
+            &None,
+            &gate,
+            &json!({"self_mute":false,"self_deaf":false,"deaf":true}),
+            true,
+        );
+        assert!(!gate.transmit_allowed());
+        assert!(gate.is_deafened());
+        assert!(snapshot(&state).server_suppressed);
+        apply_confirmed_voice_state(
+            &state,
+            &None,
+            &gate,
+            &json!({"self_mute":false,"self_deaf":false}),
+            true,
+        );
+        assert!(gate.transmit_allowed());
+        assert!(!gate.is_deafened());
+        apply_confirmed_voice_state(&state, &None, &gate, &json!({}), true);
+        assert!(!gate.transmit_allowed());
+    }
+    #[test]
+    fn initial_mute_sync_needs_owned_session_not_recovery_device_pins() {
+        let (mut recovery, mut pending) = authorized_recovery();
+        recovery.config = None;
+        assert!(voice_flags_authorized(&recovery, Some(&pending)));
+        assert!(!recovery.authorized(Some(&pending)));
+        pending.session = Some("another-session".into());
+        assert!(!voice_flags_authorized(&recovery, Some(&pending)));
+    }
     #[test]
     fn idle_voice_requires_complete_roster_and_own_matching_channel() {
         let state = Arc::new(Mutex::new(UiState {

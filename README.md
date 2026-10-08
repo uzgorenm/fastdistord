@@ -15,7 +15,7 @@ Packages: Mac Apple Silicon DMG, Windows x64 EXE installer, and a Linux amd64 De
 ## Features
 
 - Browse friends, private conversations and server channels in one sidebar
-- Start individual friend calls, with participant and speaking indicators
+- Start individual friend calls, with persistent call status, local events and optional sounds
 - Two-way voice with DAVE encryption, mute, deafen and push-to-talk
 - Choose microphones and speakers, check input levels and adjust output volume
 - Stay in a call from the tray where supported, with bounded device/session recovery

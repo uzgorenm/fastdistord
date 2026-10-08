@@ -4,6 +4,7 @@
 //! use a bounded worker. A password edit owns the only UI copy of the token.
 
 mod images;
+mod sounds;
 use std::sync::{Arc, Mutex, mpsc::Sender};
 use std::time::Duration;
 
@@ -81,6 +82,8 @@ pub fn run(
 
 struct VoiceApp {
     images: images::Cache,
+    sounds: sounds::Player,
+    sound_error: Option<String>,
     state: Arc<Mutex<UiState>>,
     commands: Sender<Command>,
     gate: Arc<TxGate>,
@@ -150,6 +153,11 @@ impl VoiceApp {
         let ptt = hotkey::PushToTalk::start(Arc::clone(&gate), waker.clone());
         Self {
             images: images::Cache::default(),
+            sounds: sounds::Player::new({
+                let sound_waker = waker.clone();
+                move || sound_waker.wake()
+            }),
+            sound_error: None,
             state,
             commands,
             gate,
@@ -197,6 +205,19 @@ impl VoiceApp {
     }
 
     fn send(&mut self, command: Command) {
+        if matches!(
+            &command,
+            Command::Leave
+                | Command::Logout
+                | Command::Quit
+                | Command::CallDm(_)
+                | Command::Join { .. }
+                | Command::SetDeafened(true)
+                | Command::SetCallSounds(false)
+        ) {
+            self.sounds.stop();
+        }
+
         if matches!(&command, Command::Logout | Command::Quit) {
             self.images.suspend();
             self.qr_login = None;
@@ -245,6 +266,11 @@ impl VoiceApp {
     }
 
     fn background(&mut self, ctx: &egui::Context) {
+        let sound_state = self.snapshot();
+        if let Some(error) = self.sounds.sync(&sound_state) {
+            self.sound_error = Some(error.into());
+        }
+
         if self.draft_reset_pending {
             clear_message_editor(ctx);
         }
@@ -279,8 +305,16 @@ impl VoiceApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                 }
-                Event::Menu("mute") => self.send(Command::SetMuted(!muted)),
-                Event::Menu("deafen") => self.send(Command::SetDeafened(!deafened)),
+                Event::Menu("mute") => {
+                    let retry = !muted
+                        && sound_state.phase == Phase::VoiceReady
+                        && sound_state.confirmed_muted == Some(true);
+                    self.send(Command::SetMuted(if retry { false } else { !muted }));
+                }
+                Event::Menu("deafen") => {
+                    let retry = !deafened && sound_state.confirmed_deafened == Some(true);
+                    self.send(Command::SetDeafened(if retry { false } else { !deafened }));
+                }
                 Event::Menu("leave") => {
                     self.release_ptt();
                     self.send(Command::Leave);
@@ -295,15 +329,31 @@ impl VoiceApp {
                     "mute",
                     if muted {
                         "Unmute microphone"
+                    } else if sound_state.phase == Phase::VoiceReady
+                        && sound_state.confirmed_muted == Some(true)
+                    {
+                        "Unmute on Discord"
+                    } else if !self.gate.transmit_allowed() {
+                        "Cancel pending unmute"
                     } else {
                         "Mute microphone"
                     },
                 );
                 tray.set_label("deafen", if deafened { "Undeafen" } else { "Deafen" });
-                tray.set_enabled("mute", has_account);
+                tray.set_enabled(
+                    "mute",
+                    has_account
+                        && !sound_state.deafened
+                        && !sound_state.server_deafened
+                        && sound_state.confirmed_deafened != Some(true),
+                );
                 tray.set_enabled("deafen", has_account);
                 tray.set_enabled("leave", has_voice_session(phase));
-                tray.set_tooltip(format!("fastdistord\n{}", phase_label(phase)));
+                tray.set_tooltip(format!(
+                    "fastdistord\n{}\n{}",
+                    phase_label(phase),
+                    crate::calls::mic_reason(&sound_state, self.gate.transmit_allowed())
+                ));
             }
             self.last_tray_revision = Some(revision);
         }
@@ -323,6 +373,8 @@ impl VoiceApp {
     fn send_shutdown(&mut self) {
         if !self.shutdown_sent {
             self.shutdown_sent = true;
+            self.sounds.stop();
+            self.images.suspend();
             self.gate.fail_closed();
             self.ptt.stop();
             self.token.zeroize();
@@ -965,7 +1017,33 @@ impl VoiceApp {
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for message in &state.messages {
+                enum Entry<'a> {
+                    Message(&'a crate::messaging::ChatMessage),
+                    Call(&'a crate::calls::Event),
+                }
+                let mut entries: Vec<(u64, Entry<'_>)> = state
+                    .messages
+                    .iter()
+                    .map(|m| ((m.id >> 22) + 1_420_070_400_000, Entry::Message(m)))
+                    .collect();
+                entries.extend(
+                    state
+                        .call_events
+                        .iter()
+                        .filter(|e| e.channel == channel_id)
+                        .map(|e| (e.at, Entry::Call(e))),
+                );
+                entries.sort_by_key(|entry| entry.0);
+                for (_, entry) in entries {
+                    let message = match entry {
+                        Entry::Call(event) => {
+                            ui.label(RichText::new(event.text).size(12.0).color(theme::SECONDARY));
+                            ui.add_space(8.0);
+                            continue;
+                        }
+                        Entry::Message(message) => message,
+                    };
+
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&message.author_name).strong());
                     });
@@ -1044,6 +1122,49 @@ impl VoiceApp {
     }
 
     fn controls(&mut self, ui: &mut egui::Ui, state: &UiState) {
+        if let Some(call) = &state.current_call {
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(&call.target).strong()).truncate())
+                    .on_hover_text(&call.target);
+                ui.label(
+                    RichText::new(call.stage.label())
+                        .size(12.0)
+                        .color(theme::SECONDARY),
+                );
+                ui.label(if state.participants.is_empty() {
+                    "Waiting for participant state".into()
+                } else {
+                    format!("{} participants", state.participants.len())
+                });
+                if let Some(start) = call.active_since {
+                    let seconds = (call.elapsed + start.elapsed()).as_secs();
+                    ui.label(format!("{}:{:02}", seconds / 60, seconds % 60));
+                    ui.ctx().request_repaint_after(Duration::from_secs(1));
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button(if call.stage == crate::calls::Stage::Connecting {
+                            "Cancel"
+                        } else {
+                            "Leave"
+                        })
+                        .clicked()
+                    {
+                        self.release_ptt();
+                        self.send(Command::Leave);
+                    }
+                });
+            });
+            ui.label(
+                RichText::new(crate::calls::mic_reason(
+                    state,
+                    self.gate.transmit_allowed(),
+                ))
+                .size(11.0)
+                .color(theme::SECONDARY),
+            );
+            ui.separator();
+        }
         ui.horizontal_wrapped(|ui| {
             let active = has_voice_session(state.phase);
             if let Some(account) = &state.account {
@@ -1065,31 +1186,59 @@ impl VoiceApp {
                     );
                 });
             }
+            let transmitting = self.gate.transmit_allowed() && state.phase == Phase::VoiceReady;
+            let retry_unmute = !state.muted
+                && state.phase == Phase::VoiceReady
+                && state.confirmed_muted == Some(true);
+            let mic_label = if retry_unmute {
+                "Unmute on Discord"
+            } else if state.muted {
+                "Unmute microphone"
+            } else if state.phase == Phase::VoiceReady
+                && state.confirmed_muted == Some(false)
+                && state.confirmed_deafened == Some(false)
+                && !state.server_suppressed
+            {
+                "Mute microphone"
+            } else if !transmitting {
+                "Cancel unmute · microphone remains closed"
+            } else {
+                "Mute microphone"
+            };
             if control_icon(
                 ui,
                 ControlIcon::Mic,
-                state.muted,
-                !state.deafened,
-                if state.muted {
-                    "Unmute microphone"
-                } else {
-                    "Mute microphone"
-                },
+                !transmitting,
+                !state.deafened && !state.server_deafened && state.confirmed_deafened != Some(true),
+                mic_label,
             )
+            .on_hover_text(crate::calls::mic_reason(state, transmitting))
             .clicked()
             {
-                self.send(Command::SetMuted(!state.muted));
+                self.send(Command::SetMuted(if retry_unmute {
+                    false
+                } else {
+                    !state.muted
+                }));
             }
+            let effective_deaf =
+                state.deafened || state.server_deafened || state.confirmed_deafened == Some(true);
             if control_icon(
                 ui,
                 ControlIcon::Headphones,
-                state.deafened,
-                true,
-                if state.deafened { "Undeafen" } else { "Deafen" },
+                effective_deaf,
+                !state.server_deafened,
+                if effective_deaf { "Undeafen" } else { "Deafen" },
             )
             .clicked()
             {
-                self.send(Command::SetDeafened(!state.deafened));
+                self.send(Command::SetDeafened(
+                    if !state.deafened && state.confirmed_deafened == Some(true) {
+                        false
+                    } else {
+                        !state.deafened
+                    },
+                ));
             }
             if control_icon(ui, ControlIcon::Settings, false, true, "Settings").clicked() {
                 self.settings_open = true;
@@ -1098,14 +1247,6 @@ impl VoiceApp {
                 self.send(Command::RefreshDevices);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if active
-                    && ui
-                        .button(RichText::new("Disconnect").color(theme::DANGER))
-                        .clicked()
-                {
-                    self.release_ptt();
-                    self.send(Command::Leave);
-                }
                 if state.ptt_enabled {
                     let talk = ui.add_enabled(
                         state.phase == Phase::VoiceReady && !state.muted && !state.deafened,
@@ -1180,6 +1321,15 @@ impl VoiceApp {
                 let mut volume = state.output_volume;
                 if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0).text("Output volume")).changed() {
                     self.send(Command::SetOutputVolume(volume));
+                }
+                let mut call_sounds = state.call_sounds;
+                if ui.checkbox(&mut call_sounds, "Call sounds").changed() { self.send(Command::SetCallSounds(call_sounds)); }
+                let mut sound_volume = state.sound_volume;
+                if ui.add_enabled(call_sounds, egui::Slider::new(&mut sound_volume, 0.0..=1.0).text("Call sound volume")).changed() { self.send(Command::SetSoundVolume(sound_volume)); }
+                if let Some(error) = &self.sound_error { ui.label(RichText::new(error).size(12.0).color(theme::DANGER)); }
+                ui.label(state.microphone_permission.label());
+                if matches!(state.microphone_permission, crate::microphone::Permission::Denied | crate::microphone::Permission::Restricted) {
+                    ui.label("Open System Settings → Privacy & Security → Microphone, then Join again.");
                 }
                 ui.collapsing("Advanced & privacy", |ui| {
                     ui.label("Use headphones. Echo cancellation is not available.");
@@ -1334,7 +1484,7 @@ impl VoiceApp {
         // Only a visible, running input meter asks for a 10 Hz repaint.
         if meter_needs_repaint(
             state.phase,
-            state.muted,
+            state.muted || !self.gate.transmit_allowed(),
             state.deafened,
             ctx.input(|i| {
                 i.viewport().minimized.unwrap_or(false) || i.viewport().occluded.unwrap_or(false)

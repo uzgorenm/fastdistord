@@ -9,7 +9,7 @@
 | Connect | Explicitly opts into the unofficial adapter and checks the entered account |
 | Friends / Servers | Switches the sidebar list; server channels appear inline |
 | Friend | Opens a private conversation without calling |
-| Call | Starts the selected individual DM call; rings its recipient after the secure voice transport connects; audio still waits for DAVE |
+| Call | Starts the selected individual DM call; audio waits for DAVE and microphone permission. Ring requests and confirmed ringing are shown separately |
 | Join · channel | Joins that voice channel and opens audio only after DAVE readiness |
 | Mute | Immediately closes outgoing audio; buffered pre-mute samples are invalidated |
 | Deafen | Silences receive audio and closes outgoing audio |
@@ -30,17 +30,27 @@ Type plain text and press **Send**. Enter adds a line rather than sending. Messa
 
 Sending disables server/channel changes until the response arrives. A failed send keeps the draft. If its outcome is uncertain, refresh history before retrying to avoid duplicates. Switching text channels or servers clears the unsent draft. Logout cancels pending text work and clears displayed history. Channel changes, successful sends and logout also erase the editor undo history, so Undo cannot restore a draft from an earlier scope.
 
+## Call feedback
+
+The compact current-call panel stays above the profile controls while you browse. It shows the target, known participants and Connecting, Ring requested, Ringing, encryption pending, or Voice connected. Elapsed time appears only for encrypted voice with opened audio devices. Cancel/Leave ends the selected call.
+
+“You started a call” and answered/ended notices are local conversation events after the matching server call is confirmed. They are not messages sent to Discord, are bounded in memory and disappear on logout. Original local tones provide connecting, confirmed-ringing and join/leave feedback. Settings has Call sounds and a separate volume control; deafen silences them. Local sound is not proof of remote notification. Ring cancellation is one scoped best-effort request, without retries or a delivery guarantee.
+
+The microphone icon reflects the actual transmission gate. An unmute request can stay pending during encryption setup or until Discord confirms self-mute is off. Server mute/deafen, another voice owner, released/unknown PTT, missing permission and device failures can keep it closed. A new voice-session owner stops this client; it does not fight the other session. Use Unmute on Discord to explicitly retry a ready call's unmute.
+
 ## Devices and background use
 
 Choose stable device IDs through their friendly names in Settings. Selections apply on your next Join: leave and rejoin to change devices safely. Removed devices are labeled unavailable. Idle/disconnected mode never captures audio. A device failure closes this audio engine immediately. Recovery retries only the same pinned microphone and speaker IDs with bounded backoff. It never substitutes another device; exhausted retries leave an actionable failure. OS-managed virtual devices can change their underlying physical route outside the app, which still needs hardware testing.
 
 Closing a window keeps an active call running only when a usable tray/menu-bar path exists. Reopen from the tray; choose Quit to exit. Without a functioning tray, ordinary window close exits so the process does not become inaccessible. Audio and global PTT are independent of rendered UI frames.
 
+On macOS, Settings reports the native microphone authorization status. An explicit Join/Call requests access only when encryption is ready to open audio. Denial or an unanswered request stops that attempt; the app cannot grant permission. For denied access, use [System Settings → Privacy & Security → Microphone](https://support.apple.com/guide/mac-help/control-access-to-the-microphone-on-mac-mchla1b1e1fe/mac), then explicitly Join again. A pending sole-member MLS group may not reach the permission request yet.
+
 ## Common problems
 
 - **Account denied:** the unofficial adapter may not be accepted for your account. No MFA/CAPTCHA/protection bypass is provided. Do not repeatedly retry; use official Discord if this route is unavailable.
 - **Rate limited:** stop and wait before retrying. There is no automatic bypass or alternate account attempt.
-- **Joined · encryption pending:** a confirmed sole participant can stay joined while waiting for the MLS group exchange. Initial audio devices remain closed. When a peer joins, DAVE must finish before audio opens. An unknown roster, peer handshake stall or MLS failure still has a bounded timeout.
+- **Joined · encryption pending:** a confirmed sole participant can stay joined while waiting for the MLS group exchange. Voice audio streams remain closed; optional local feedback can use the speaker. When a peer joins, DAVE must finish before audio opens. An unknown roster, peer handshake stall or MLS failure still has a bounded timeout.
 - In Settings, enable **Record redacted voice handshake trace** before a test join, then use **Copy handshake trace** to report a failure. This memory-only trace contains typed stages, timings, protocol versions, participant counts and transition IDs; no credentials, user IDs, keys or packet payloads. Disabling it clears the retained trace.
 - **Microphone or speaker unavailable:** recovery retries the same authorized device IDs; it does not fall back to a different microphone or speaker. Check OS permissions, connected devices and selected route. On macOS, launch the `.app` containing its microphone usage description. Leave, select a valid device and rejoin.
 - **Silent while PTT is enabled:** both explicit unmute and a held talk control are necessary. Server mute/deafen/suppression remains authoritative.

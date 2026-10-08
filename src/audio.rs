@@ -41,6 +41,7 @@ const PTT_ENABLED: u64 = 8;
 const PTT_DOWN: u64 = 16;
 const PTT_KNOWN: u64 = 32;
 const ENCRYPTION_PENDING: u64 = 64;
+const REMOTE_MUTED: u64 = 128;
 const FLAGS_MASK: u64 = 0xff;
 const TX_GENERATION_MASK: u64 = ((1_u64 << 28) - 1) << 8;
 const RX_GENERATION_MASK: u64 = ((1_u64 << 28) - 1) << 36;
@@ -68,7 +69,7 @@ struct GateSnapshot(u64);
 
 impl GateSnapshot {
     fn allowed(self) -> bool {
-        self.0 & (MUTED | DEAFENED | SUPPRESSED | ENCRYPTION_PENDING) == 0
+        self.0 & (MUTED | DEAFENED | SUPPRESSED | ENCRYPTION_PENDING | REMOTE_MUTED) == 0
             && (self.0 & PTT_ENABLED == 0
                 || self.0 & (PTT_DOWN | PTT_KNOWN) == PTT_DOWN | PTT_KNOWN)
     }
@@ -120,6 +121,15 @@ impl TxGate {
     }
     pub fn set_deafened(&self, value: bool) {
         self.flag(DEAFENED, value);
+    }
+    pub fn set_remote_muted(&self, value: bool) {
+        self.change(|flags| {
+            if value {
+                (flags | REMOTE_MUTED) & !(PTT_DOWN | PTT_KNOWN)
+            } else {
+                flags & !REMOTE_MUTED
+            }
+        });
     }
     pub fn set_suppressed(&self, value: bool) {
         self.flag(SUPPRESSED, value);
@@ -245,7 +255,11 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>> {
     Ok(result)
 }
 
-fn select_device(host: &cpal::Host, selector: Option<&str>, input: bool) -> Result<cpal::Device> {
+pub(crate) fn select_device(
+    host: &cpal::Host,
+    selector: Option<&str>,
+    input: bool,
+) -> Result<cpal::Device> {
     let kind = if input { "input" } else { "output" };
     let Some(selector) = selector else {
         return (if input {
@@ -288,7 +302,7 @@ fn supported_format(format: SampleFormat) -> bool {
     )
 }
 
-fn select_config(device: &cpal::Device, input: bool) -> Result<SupportedStreamConfig> {
+pub(crate) fn select_config(device: &cpal::Device, input: bool) -> Result<SupportedStreamConfig> {
     // Prefer the OS default for route/channel semantics. A rate conversion is
     // cheaper than accidentally selecting a surround/loopback route.
     let default = if input {
@@ -1218,6 +1232,34 @@ mod tests {
         )
     }
 
+    #[test]
+    fn discord_mute_confirmation_cycle_revokes_queued_pcm_and_held_ptt() {
+        let (mut producer, mut reader, gate) = reader_fixture();
+        producer
+            .push(CaptureSample {
+                sample: 0.75,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        gate.set_remote_muted(true);
+        assert!(!gate.transmit_allowed());
+        gate.set_remote_muted(false);
+        producer
+            .push(CaptureSample {
+                sample: 0.25,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        let mut bytes = [0; 4];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(f32::from_le_bytes(bytes), 0.25);
+        gate.set_ptt_enabled(true);
+        gate.set_ptt_pressed(Some(true));
+        assert!(gate.transmit_allowed());
+        gate.set_remote_muted(true);
+        gate.set_remote_muted(false);
+        assert!(!gate.transmit_allowed());
+    }
     #[test]
     fn starts_muted_and_suppressed() {
         let gate = TxGate::default();

@@ -2,8 +2,10 @@
 
 mod account;
 mod audio;
+mod calls;
 mod credential;
 mod messaging;
+mod microphone;
 mod model;
 mod profiles;
 mod qr_login;
@@ -15,6 +17,10 @@ mod ui;
 fn main() -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!("fastdistord {}", fastdistord::RELEASE_VERSION);
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--microphone-status") {
+        println!("{}", microphone::status().label());
         return Ok(());
     }
     let state = std::sync::Arc::new(std::sync::Mutex::new(model::UiState::default()));
