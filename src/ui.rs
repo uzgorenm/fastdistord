@@ -802,7 +802,8 @@ impl VoiceApp {
             return;
         };
         ui.horizontal(|ui| {
-            ui.add(
+            ui.add_sized(
+                [(ui.available_width() - 90.0).max(80.0), 30.0],
                 egui::Label::new(RichText::new(format!("# {}", channel.name)).heading()).truncate(),
             )
             .on_hover_text(&channel.name);
