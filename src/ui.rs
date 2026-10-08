@@ -501,7 +501,7 @@ impl VoiceApp {
                 crate::qr_login::Event::Failed(message) => {
                     self.qr_code = None;
                     self.qr_login = None;
-                    self.qr_status = message.into();
+                    self.qr_status = message;
                 }
             }
         }
