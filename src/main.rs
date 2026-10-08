@@ -1,6 +1,7 @@
 mod account;
 mod audio;
 mod credential;
+mod messaging;
 mod model;
 mod recovery;
 mod runtime;

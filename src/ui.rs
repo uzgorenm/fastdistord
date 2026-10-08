@@ -97,6 +97,10 @@ struct VoiceApp {
     shutdown_sent: bool,
     last_tray_revision: Option<u64>,
     local_error: Option<String>,
+    text_open: bool,
+    message_draft: String,
+    draft_channel: Option<u64>,
+    last_sent_revision: u64,
 }
 
 impl VoiceApp {
@@ -148,6 +152,10 @@ impl VoiceApp {
             shutdown_sent: false,
             last_tray_revision: None,
             local_error: None,
+            text_open: false,
+            message_draft: String::new(),
+            draft_channel: None,
+            last_sent_revision: 0,
         }
     }
 
@@ -272,7 +280,8 @@ impl VoiceApp {
                 RichText::new("fastdistord").font(fastframe_fonts::Weight::SemiBold.font_id(20.0)),
             );
             ui.add_space(10.0);
-            ui.label(RichText::new("VOICE").size(10.0).color(theme::SECONDARY));
+            ui.selectable_value(&mut self.text_open, false, "Voice");
+            ui.selectable_value(&mut self.text_open, true, "Text");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = true;
@@ -310,9 +319,12 @@ impl VoiceApp {
                 for guild in &state.guilds {
                     let selected = state.selected_guild == Some(guild.id);
                     if ui
-                        .add_sized(
-                            [ui.available_width(), 35.0],
-                            egui::Button::new(&guild.name).truncate().selected(selected),
+                        .add_enabled(
+                            !state.chat_sending,
+                            egui::Button::new(&guild.name)
+                                .truncate()
+                                .selected(selected)
+                                .min_size(Vec2::new(ui.available_width(), 35.0)),
                         )
                         .on_hover_text(&guild.name)
                         .clicked()
@@ -325,8 +337,40 @@ impl VoiceApp {
         ui.add_space(15.0);
         ui.separator();
         ui.add_space(12.0);
-        section_label(ui, "VOICE CHANNELS");
+        section_label(
+            ui,
+            if self.text_open {
+                "TEXT CHANNELS"
+            } else {
+                "VOICE CHANNELS"
+            },
+        );
         ui.add_space(8.0);
+        if self.text_open {
+            egui::ScrollArea::vertical()
+                .id_salt("text_channels")
+                .show(ui, |ui| {
+                    for channel in &state.text_channels {
+                        if ui
+                            .add_enabled(
+                                !state.chat_sending,
+                                egui::Button::new(format!("# {}", channel.name))
+                                    .truncate()
+                                    .selected(state.selected_text_channel == Some(channel.id))
+                                    .min_size(Vec2::new(ui.available_width(), 34.0)),
+                            )
+                            .on_hover_text(&channel.name)
+                            .clicked()
+                        {
+                            self.send(Command::SelectTextChannel(channel.id));
+                        }
+                    }
+                    if state.text_channels.is_empty() {
+                        ui.label("Choose a server to see text channels.");
+                    }
+                });
+            return;
+        }
         egui::ScrollArea::vertical()
             .id_salt("voice_channels")
             .auto_shrink([false, false])
@@ -659,6 +703,100 @@ impl VoiceApp {
         }
     }
 
+    fn text_panel(&mut self, ui: &mut egui::Ui, state: &UiState) {
+        if self.draft_channel != state.selected_text_channel {
+            self.message_draft.zeroize();
+            self.draft_channel = state.selected_text_channel;
+        }
+        if self.last_sent_revision != state.sent_revision {
+            self.message_draft.zeroize();
+            self.last_sent_revision = state.sent_revision;
+        }
+        let Some(channel) = state
+            .text_channels
+            .iter()
+            .find(|c| Some(c.id) == state.selected_text_channel)
+        else {
+            ui.heading("Choose a text channel");
+            ui.label("Read the latest 50 messages and send plain text. Switching channels clears an unsent draft.");
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.heading(format!("# {}", channel.name));
+            if ui
+                .add_enabled(!state.chat_busy, egui::Button::new("Refresh"))
+                .clicked()
+            {
+                self.send(Command::RefreshMessages);
+            }
+        });
+        ui.label(
+            RichText::new(&state.chat_status)
+                .size(12.0)
+                .color(theme::SECONDARY),
+        );
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical()
+            .id_salt(("messages", channel.id))
+            .max_height((ui.available_height() - 160.0).max(60.0))
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for message in &state.messages {
+                    ui.label(RichText::new(&message.author_name).strong());
+                    ui.add(
+                        egui::Label::new(if message.content.is_empty() {
+                            "[No plain text]"
+                        } else {
+                            &message.content
+                        })
+                        .wrap()
+                        .selectable(true),
+                    );
+                    ui.add_space(10.0);
+                }
+                if state.messages.is_empty() && !state.chat_busy {
+                    ui.label("No messages in this snapshot.");
+                }
+            });
+        ui.separator();
+        ui.label(format!("Message to # {}", channel.name));
+        ui.add_enabled(
+            !state.chat_sending,
+            egui::TextEdit::multiline(&mut self.message_draft)
+                .char_limit(crate::messaging::MAX_MESSAGE_CHARS)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal(|ui| {
+            let valid = crate::messaging::send_payload(&self.message_draft).is_ok();
+            if primary_button(
+                ui,
+                if state.chat_sending {
+                    "Sending…"
+                } else {
+                    "Send message"
+                },
+                valid && !state.chat_busy,
+            )
+            .clicked()
+            {
+                self.send(Command::SendMessage {
+                    channel_id: channel.id,
+                    content: self.message_draft.clone(),
+                });
+            }
+            ui.label(format!("{}/2000", self.message_draft.chars().count()));
+        });
+        ui.label(
+            RichText::new(
+                "Plain text · mentions and link embeds suppressed · no automatic send retries",
+            )
+            .size(12.0)
+            .color(theme::SECONDARY),
+        );
+    }
+
     fn controls(&mut self, ui: &mut egui::Ui, state: &UiState) {
         ui.horizontal(|ui| {
             if let Some(account) = &state.account {
@@ -935,11 +1073,18 @@ impl VoiceApp {
                     ui.add_space(12.0);
                 }
                 if state.account.is_none() {
+                    self.message_draft.zeroize();
+                    self.draft_channel = None;
+                    self.last_sent_revision = state.sent_revision;
                     egui::ScrollArea::vertical()
                         .id_salt("connect_panel")
                         .show(ui, |ui| self.connect_panel(ui, &state));
                 } else {
-                    self.call_panel(ui, &state);
+                    if self.text_open {
+                        self.text_panel(ui, &state);
+                    } else {
+                        self.call_panel(ui, &state);
+                    }
                 }
             });
         self.settings(&ctx, &state);

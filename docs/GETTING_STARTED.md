@@ -1,6 +1,6 @@
 # Getting started
 
-A small native Rust/fastframe voice-first Discord client experiment. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, text chat, recording, or telemetry.
+A small native Rust/fastframe voice-first Discord client experiment. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, recording, or telemetry.
 
 **Experimental and not live-validated.** Discord's supported personal-user `voice` OAuth scope is restricted to approved partners. No qualifying generally available supported route was found for arbitrary existing server channels. This implementation therefore isolates an **unofficial personal-account adapter**, disabled until explicit risk acceptance in the app. It may violate Discord policy, cause account restrictions, or break without notice. It is not affiliated with Discord. Do not use an important account without understanding that risk.
 
@@ -14,6 +14,10 @@ A small native Rust/fastframe voice-first Discord client experiment. macOS Apple
 - Global Ctrl+Shift+Space PTT when the OS backend supports it; visible press-and-hold fallback
 - Session-only credentials by default; explicitly optional macOS Keychain save, removed on logout
 - Audio shutdown on leave/quit/logout, stale join cancellation, safe stop on disconnect/move/permission changes
+
+- Plain-text guild messaging: bounded history, manual refresh and explicit Send; mentions and embeds suppressed
+
+Camera video and screen sharing are not implemented. League overlay work is stopped.
 
 ## Build
 

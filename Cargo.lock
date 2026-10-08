@@ -1499,6 +1499,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cpal",
+ "davey",
  "eframe",
  "egui",
  "fastframe-fonts",

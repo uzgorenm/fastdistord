@@ -28,6 +28,25 @@ fn update(state: &Shared, repaint: &Repaint, f: impl FnOnce(&mut UiState)) {
 fn snapshot(state: &Shared) -> UiState {
     state.lock().map(|s| s.clone()).unwrap_or_default()
 }
+fn reset_chat(
+    state: &Shared,
+    repaint: &Repaint,
+    generation: &mut u64,
+    task: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    *generation = generation.wrapping_add(1);
+    if let Some(task) = task.take() {
+        task.abort();
+    }
+    update(state, repaint, |s| {
+        s.text_channels.clear();
+        s.selected_text_channel = None;
+        s.messages.clear();
+        s.chat_busy = false;
+        s.chat_sending = false;
+        s.chat_status = "Choose a text channel to read its latest 50 messages.".into();
+    });
+}
 enum ResultEvent {
     Account(
         u64,
@@ -35,6 +54,9 @@ enum ResultEvent {
         Option<zeroize::Zeroizing<String>>,
     ),
     Channels(u64, u64, Result<Vec<Channel>>),
+    TextChannels(u64, u64, u64, Result<Vec<crate::messaging::TextChannel>>),
+    Messages(u64, u64, u64, Result<Vec<crate::messaging::ChatMessage>>),
+    Sent(u64, u64, u64, Result<crate::messaging::ChatMessage>),
     Transport(u64, Result<Transport>),
 }
 #[derive(Default)]
@@ -170,6 +192,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     let mut pending: Option<PendingVoice> = None;
     let mut connect_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut voice_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut chat_generation = 0_u64;
     let (results_tx, mut results) = async_mpsc::channel(8);
     let (voice_tx, mut voice_events) = async_mpsc::unbounded_channel();
     let mut meter_tick = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -230,6 +254,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         risk_accepted,
                         remember,
                     } => {
+                        reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                         generation = generation.wrapping_add(1);
                         join_generation = join_generation.wrapping_add(1);
                         gate.begin_session();
@@ -273,6 +298,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                         match crate::credential::load() {
                             Ok(token) => {
+                                reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                                 generation = generation.wrapping_add(1);
                                 join_generation = join_generation.wrapping_add(1);
                                 gate.begin_session();
@@ -326,6 +352,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                     }
                     Command::Logout => {
+                        reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                         let forgotten = crate::credential::forget();
                         generation = generation.wrapping_add(1);
                         join_generation = join_generation.wrapping_add(1);
@@ -356,9 +383,17 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         });
                     }
                     Command::SelectGuild(guild) => {
+                        if snapshot(&state).chat_sending {
+                            continue;
+                        }
                         if let Some(c) = client.clone() {
+                            if !snapshot(&state).guilds.iter().any(|g| g.id == guild) {
+                                continue;
+                            }
+                            reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                             let tx = results_tx.clone();
                             let id = generation;
+                            let request = chat_generation;
                             update(&state, &repaint, |s| {
                                 s.selected_guild = Some(guild);
                                 s.channels.clear();
@@ -369,6 +404,102 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                     .send(ResultEvent::Channels(id, guild, c.channels(guild).await))
                                     .await;
                             });
+                            let c = client.as_ref().unwrap().clone();
+                            let tx = results_tx.clone();
+                            chat_task = Some(tokio::spawn(async move {
+                                let result = c.text_channels(guild).await;
+                                let _ = tx
+                                    .send(ResultEvent::TextChannels(id, request, guild, result))
+                                    .await;
+                            }));
+                        }
+                    }
+                    Command::SelectTextChannel(channel) => {
+                        let s = snapshot(&state);
+                        if s.chat_sending
+                            || !s
+                                .text_channels
+                                .iter()
+                                .any(|c| c.id == channel && Some(c.guild_id) == s.selected_guild)
+                        {
+                            continue;
+                        }
+                        if let Some(c) = client.clone() {
+                            if let Some(task) = chat_task.take() {
+                                task.abort();
+                            }
+                            chat_generation = chat_generation.wrapping_add(1);
+                            let (id, request, tx) =
+                                (generation, chat_generation, results_tx.clone());
+                            update(&state, &repaint, |s| {
+                                s.selected_text_channel = Some(channel);
+                                s.messages.clear();
+                                s.chat_busy = true;
+                                s.chat_status = "Loading message history…".into();
+                            });
+                            chat_task = Some(tokio::spawn(async move {
+                                let result = c.messages(channel).await;
+                                let _ = tx
+                                    .send(ResultEvent::Messages(id, request, channel, result))
+                                    .await;
+                            }));
+                        }
+                    }
+                    Command::RefreshMessages => {
+                        let s = snapshot(&state);
+                        if s.chat_busy {
+                            continue;
+                        }
+                        if let (Some(c), Some(channel)) = (client.clone(), s.selected_text_channel)
+                        {
+                            chat_generation = chat_generation.wrapping_add(1);
+                            let (id, request, tx) =
+                                (generation, chat_generation, results_tx.clone());
+                            update(&state, &repaint, |s| {
+                                s.chat_busy = true;
+                                s.chat_status = "Refreshing history…".into();
+                            });
+                            chat_task = Some(tokio::spawn(async move {
+                                let result = c.messages(channel).await;
+                                let _ = tx
+                                    .send(ResultEvent::Messages(id, request, channel, result))
+                                    .await;
+                            }));
+                        }
+                    }
+                    Command::SendMessage {
+                        channel_id,
+                        content,
+                    } => {
+                        let s = snapshot(&state);
+                        if s.chat_busy
+                            || s.selected_text_channel != Some(channel_id)
+                            || !s
+                                .text_channels
+                                .iter()
+                                .any(|c| c.id == channel_id && Some(c.guild_id) == s.selected_guild)
+                        {
+                            continue;
+                        }
+                        if let Err(error) = crate::messaging::send_payload(&content) {
+                            update(&state, &repaint, |s| s.chat_status = error.to_string());
+                            continue;
+                        }
+                        if let Some(c) = client.clone() {
+                            chat_generation = chat_generation.wrapping_add(1);
+                            let (id, request, tx) =
+                                (generation, chat_generation, results_tx.clone());
+                            update(&state, &repaint, |s| {
+                                s.chat_busy = true;
+                                s.chat_sending = true;
+                                s.chat_status = "Sending once…".into();
+                            });
+                            chat_task = Some(tokio::spawn(async move {
+                                let result = c.send_message(channel_id, &content).await;
+                                let _ = tx
+                                    .send(ResultEvent::Sent(id, request, channel_id, result))
+                                    .await;
+                            }));
                         }
                     }
                     Command::Join {
@@ -531,6 +662,63 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
             }
             Incoming::Result(event) => match event {
+                Some(ResultEvent::TextChannels(id, request, guild, result))
+                    if id == generation
+                        && request == chat_generation
+                        && snapshot(&state).selected_guild == Some(guild) =>
+                {
+                    chat_task.take();
+                    update(&state, &repaint, |s| match result {
+                        Ok(channels) => s.text_channels = channels,
+                        Err(error) => s.chat_status = error.to_string(),
+                    });
+                }
+                Some(ResultEvent::Messages(id, request, channel, result))
+                    if id == generation
+                        && request == chat_generation
+                        && snapshot(&state).selected_text_channel == Some(channel) =>
+                {
+                    chat_task.take();
+                    update(&state, &repaint, |s| {
+                        s.chat_busy = false;
+                        match result {
+                            Ok(messages) => {
+                                s.messages = messages;
+                                s.chat_status =
+                                    "Latest 50 messages · Refresh to check for updates.".into();
+                            }
+                            Err(error) => s.chat_status = error.to_string(),
+                        }
+                    });
+                }
+                Some(ResultEvent::Sent(id, request, channel, result))
+                    if id == generation
+                        && request == chat_generation
+                        && snapshot(&state).selected_text_channel == Some(channel) =>
+                {
+                    chat_task.take();
+                    update(&state, &repaint, |s| {
+                        s.chat_busy = false;
+                        s.chat_sending = false;
+                        match result {
+                            Ok(message) => {
+                                s.messages.retain(|m| m.id != message.id);
+                                s.messages.push(message);
+                                s.messages.sort_by_key(|m| m.id);
+                                if s.messages.len() > crate::messaging::MAX_HISTORY {
+                                    s.messages.remove(0);
+                                }
+                                s.sent_revision = s.sent_revision.wrapping_add(1);
+                                s.chat_status = "Message sent.".into();
+                            }
+                            Err(error) => {
+                                s.chat_status = format!(
+                                    "{error} Check history before retrying; no automatic retry was made."
+                                )
+                            }
+                        }
+                    });
+                }
                 Some(ResultEvent::Account(id, result, saved)) if id == generation => match result {
                     Ok((c, a, guilds)) => {
                         if let Some(secret) = saved
@@ -1033,6 +1221,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
         }
     }
     gate.fail_closed();
+    if let Some(t) = chat_task {
+        t.abort();
+    }
     if let Some(t) = connect_task {
         t.abort();
     }
@@ -1382,5 +1573,34 @@ mod tests {
             assert_eq!(generation, 8);
             assert_eq!(recovery.budget.attempts(), 1);
         }
+    }
+    // Account/channel changes must release pending history and erase displayed
+    // text, without changing the independent call's microphone controls.
+    #[tokio::test]
+    async fn leaving_text_scope_erases_history_and_cancels_pending_read() {
+        let state = Arc::new(Mutex::new(UiState {
+            selected_text_channel: Some(10),
+            messages: vec![crate::messaging::ChatMessage {
+                id: 1,
+                author_id: 2,
+                author_name: "Tester".into(),
+                content: "Private test text".into(),
+            }],
+            chat_busy: true,
+            muted: false,
+            ..Default::default()
+        }));
+        let mut request = 7;
+        let mut task = Some(tokio::spawn(std::future::pending::<()>()));
+        let abort = task.as_ref().unwrap().abort_handle();
+        reset_chat(&state, &None, &mut request, &mut task);
+        tokio::task::yield_now().await;
+        let s = snapshot(&state);
+        assert!(s.messages.is_empty());
+        assert_eq!(s.selected_text_channel, None);
+        assert!(!s.chat_busy);
+        assert!(!s.muted);
+        assert_ne!(request, 7);
+        assert!(abort.is_finished());
     }
 }

@@ -8,6 +8,8 @@ description = "A small, voice-first personal Discord client experiment"
 
 [dependencies]
 anyhow = "1"
+# Shared codec-aware DAVE implementation for the separate video pipeline.
+davey = "=0.1.4"
 # Davey has TRACE messages containing key material; compile debug/trace out.
 tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
 async-trait = "0.1"

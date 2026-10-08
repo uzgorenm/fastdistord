@@ -1,6 +1,6 @@
 # fastdistord
 
-**Discord voice, in a small native app.** A Rust + fastframe personal-account experiment, with macOS Apple Silicon as the primary target.
+**Discord voice and text, in a small native app.** A Rust + fastframe personal-account experiment for macOS Apple Silicon.
 
 [Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Verification](docs/VERIFICATION.md) · [Contribute](CONTRIBUTING.md) · [Packaging](PACKAGING.md)
 
@@ -12,7 +12,7 @@
 
 There is **no public release, Homebrew cask, Developer-ID-signed download, or notarized Mac app**. The private CI workflow packages macOS Apple Silicon and Linux x86_64 downloads after successful builds. The new artifact-upload steps must finish before those downloads exist; see below. macOS audio, Keychain, shortcuts and real Discord calls still need authorized native testing. Read [what passed and what did not](docs/VERIFICATION.md).
 
-## Voice-first features
+## Features
 
 - Account, server and voice-channel selection; participants and speaking events
 - Two-way CPAL audio through Songbird/Opus and mandatory DAVE encryption
@@ -21,12 +21,15 @@ There is **no public release, Homebrew cask, Developer-ID-signed download, or no
 - Tray-based background calling when supported by the desktop
 - Bounded session/device recovery with explicit mute preserved and no fallback microphone
 - Optional macOS Keychain storage; no recording or telemetry
+- Text-channel selection, latest 50 messages, manual refresh and explicit plain-text sending
+
+Voice and text are implemented but still need a real Discord session to verify. Camera video and screen sharing are unfinished; [media status](docs/MEDIA.md) describes the offline encryption component and missing stages.
 
 Use headphones. Echo cancellation, noise suppression and automatic gain control are not implemented.
 
 ## Private build downloads
 
-Open this repository's [Actions](https://github.com/uzgorenm/fastdistord/actions), choose a successful **Check** run for the desired commit, and look under **Artifacts**. You must be signed into GitHub with access to this private repository. Artifacts expire after14days and are development builds, not published releases.
+Open this repository's [Actions](https://github.com/uzgorenm/fastdistord/actions), choose a successful **Check** run for the desired commit, and look under **Artifacts**. You must be signed into GitHub with access to this private repository. Artifacts expire after 14 days and are development builds, not published releases.
 
 - **macOS Apple Silicon:** download the macOS artifact, unzip it, then unzip `fastdistord-macos-arm64.zip` to obtain `Fastdistord.app`. It is locally ad-hoc signed, not notarized. Native build/signature checks do not prove microphone or live-call behavior.
 - **Linux x86_64:** download the Linux artifact, unzip it, extract `fastdistord-linux-x86_64.tar.gz`, then run `./fastdistord`. Built on Ubuntu24.04; requires compatible glibc and ALSA/GUI runtime libraries. It is not a universal AppImage.

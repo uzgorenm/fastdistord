@@ -1,3 +1,17 @@
+# Native Mac continuation, 2026-10-08
+
+The Mac checkout began at `bb9536ba5b2356e81ba59bdb29e6184d10a0eb6e`. The interrupted account/messaging edits were preserved and integrated with text-channel selection, manual history refresh and explicit plain-text Send. Pending history requests are canceled on scope changes; stale results cannot replace the current account/channel snapshot. A regression test checks that scope changes erase displayed text and cancel pending reads without altering voice mute state.
+
+Native Apple Silicon Rust 1.99.0 checks passed: format, strict Clippy, 60 application tests and six standalone Songbird DAVE policy tests. The separate video boundary has three additional offline tests; see [media status](MEDIA.md) for what they verify. Final test results should be checked for the reviewed commit.
+
+A local release build and `scripts/bundle-macos.sh` succeeded. The script reuses native release output when host and requested target match. `plutil` and strict deep ad-hoc signature verification passed for `dist/Fastdistord.app`. The local Rust install reported a nonfatal `rust-objcopy` library lookup warning during debug-info stripping. The bundle is not Developer ID signed or notarized.
+
+Computer-use opening of Fastdistord remained blocked and was canceled. No GUI startup screenshot, packaged microphone permission, device round trip, background call, PTT hardware result or resource measurement is claimed. No credential was entered and no account/channel session or outgoing text/audio/video test was performed. Two-way voice, DAVE membership changes, leave/rejoin and recovery remain blocked on user credential handoff, target channel, second participant and approved test content.
+
+League overlay work and League interactions are stopped. Camera capture, screen capture, encoding, negotiated video transport and receive/decode remain unfinished. No camera or screen content was captured. No public release was published.
+
+The report below records earlier cloud checks, not native hardware acceptance.
+
 # Verification report — 2026-10-07
 
 ## Passed locally in the cloud

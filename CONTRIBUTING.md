@@ -1,6 +1,6 @@
 # Contributing
 
-Keep this a focused native voice client. No browser engine, bot/RPC substitute, recording, telemetry, account-protection bypass or unrequested service backend. Prefer small changes with a clear user benefit and tests. Discuss substantial scope changes first.
+Keep this a lightweight native voice and text client. Video and screen sharing are in scope but unfinished; League overlay work is stopped. No browser engine, bot/RPC substitute, recording, telemetry, account-protection bypass or unrequested service backend. Prefer small changes with a clear user benefit and tests. Discuss substantial scope changes first.
 
 ## Before reporting a problem
 

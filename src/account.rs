@@ -1,5 +1,6 @@
 //! Isolated, explicitly opted-in unofficial personal-account adapter.
 //! This is not Discord's bot API, an approved OAuth integration, or a promise of account safety.
+use crate::messaging::{self, ChatMessage, TextChannel};
 use crate::model::{Account, Channel, Guild};
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
@@ -29,6 +30,8 @@ impl PersonalAccount {
         }
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .user_agent("fastdistord/0.1 experimental personal voice client")
             .build()?;
         let client = Self { token, http };
@@ -53,13 +56,26 @@ impl PersonalAccount {
         Ok((client, account, guilds))
     }
     async fn get(&self, path: &str) -> Result<Value> {
-        let mut response = self
+        self.request(reqwest::Method::GET, path, None).await
+    }
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value> {
+        let mut request = self
             .http
-            .get(format!("https://discord.com/api/v10{path}"))
-            .header(reqwest::header::AUTHORIZATION, self.token.as_str())
-            .send()
-            .await
-            .context("Discord request failed")?;
+            .request(method, format!("https://discord.com/api/v10{path}"))
+            .header(reqwest::header::AUTHORIZATION, self.token.as_str());
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        // Never propagate HTTP error sources: they may include server-controlled
+        // content or URLs. Never retry a POST after an uncertain outcome.
+        let mut response = request.send().await.map_err(|_| {
+            anyhow::anyhow!("Discord request failed; its outcome may be uncertain.")
+        })?;
         match response.status().as_u16() {
             401 | 403 => {
                 bail!("Discord denied account or channel access. No retry or bypass was attempted.")
@@ -71,20 +87,52 @@ impl PersonalAccount {
                 response.status().as_u16()
             ),
         }
+        const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
         if response
             .content_length()
-            .is_some_and(|n| n > 4 * 1024 * 1024)
+            .is_some_and(|n| n > MAX_RESPONSE_BYTES as u64)
         {
             bail!("Discord response exceeded the safety limit");
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            if bytes.len().saturating_add(chunk.len()) > 4 * 1024 * 1024 {
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            anyhow::anyhow!("Discord response could not be read; its outcome may be uncertain.")
+        })? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
                 bail!("Discord response exceeded the safety limit");
             }
             bytes.extend_from_slice(&chunk);
         }
-        Ok(serde_json::from_slice(&bytes)?)
+        serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("Discord returned an invalid response."))
+    }
+    pub async fn text_channels(&self, guild_id: u64) -> Result<Vec<TextChannel>> {
+        messaging::validate_id(guild_id)?;
+        let value = self.get(&format!("/guilds/{guild_id}/channels")).await?;
+        messaging::parse_channels(&value, guild_id)
+    }
+    /// A bounded snapshot, oldest first. No background polling or pagination.
+    pub async fn messages(&self, channel_id: u64) -> Result<Vec<ChatMessage>> {
+        messaging::validate_id(channel_id)?;
+        let value = self
+            .get(&format!("/channels/{channel_id}/messages?limit=50"))
+            .await?;
+        messaging::parse_messages(&value, channel_id)
+    }
+    /// Only invoke from an explicit send action. No retries, attachments or mentions.
+    pub async fn send_message(&self, channel_id: u64, content: &str) -> Result<ChatMessage> {
+        messaging::validate_id(channel_id)?;
+        let body = messaging::send_payload(content)?;
+        let value = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/channels/{channel_id}/messages"),
+                Some(body),
+            )
+            .await?;
+        messaging::parse_message(&value, channel_id).map_err(|_| {
+            anyhow::anyhow!("Discord returned an invalid send response. The message may have been sent; check history before retrying.")
+        })
     }
     pub async fn channels(&self, guild_id: u64) -> Result<Vec<Channel>> {
         let v = self.get(&format!("/guilds/{guild_id}/channels")).await?;
@@ -112,6 +160,7 @@ impl PersonalAccount {
 pub fn snowflake(value: &Value) -> Option<u64> {
     value
         .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|s| s.parse().ok())
         .or_else(|| value.as_u64())
         .filter(|id| *id != 0)
@@ -440,6 +489,9 @@ mod tests {
         assert_eq!(snowflake(&json!("123")), Some(123));
         assert_eq!(snowflake(&json!("0")), None);
         assert_eq!(snowflake(&json!("secret")), None);
+        assert_eq!(snowflake(&json!("+123")), None);
+        assert_eq!(snowflake(&json!(" 123")), None);
+        assert_eq!(snowflake(&json!("18446744073709551616")), None);
     }
     #[tokio::test]
     async fn opt_in_is_required_before_network() {

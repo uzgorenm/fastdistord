@@ -3,10 +3,17 @@ set -eu
 cd "$(dirname "$0")/.."
 [ "$(uname -s)" = Darwin ] || { echo 'Run on macOS with Xcode command-line tools.' >&2; exit 1; }
 TARGET=${TARGET:-aarch64-apple-darwin}
-cargo build --locked --release --target "$TARGET"
+HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
+if [ "$HOST_TARGET" = "$TARGET" ]; then
+    cargo build --locked --release
+    BINARY="target/release/fastdistord"
+else
+    cargo build --locked --release --target "$TARGET"
+    BINARY="target/$TARGET/release/fastdistord"
+fi
 APP="dist/Fastdistord.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "target/$TARGET/release/fastdistord" "$APP/Contents/MacOS/fastdistord"
+cp "$BINARY" "$APP/Contents/MacOS/fastdistord"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
