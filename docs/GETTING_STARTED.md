@@ -50,12 +50,16 @@ The script validates the microphone usage description and adds a local ad-hoc si
 
 1. Read the unofficial-access risk disclosure. No official desktop/web client needs to be running for this adapter.
 2. Enter your own credential **only in the local password field**. Never paste it into chat, commit it, put it on a command line, or extract it from another application's files. No credential acquisition or protection-bypass mechanism is supplied.
-3. Leave “Remember in macOS Keychain” unchecked for memory-only access. Connecting with a saved credential also requires risk acceptance.
+3. Use **Session credential** for local entry; leave “Remember in macOS Keychain” unchecked for memory-only access. If you previously saved a credential in this app, choose **Use Keychain**, accept the risk, then **Connect from Keychain**. Selecting the tab alone does not read Keychain. Missing or inaccessible saved credentials produce an error; return to session entry.
 4. Choose a server and voice channel, then click Join. **This action authorizes opening your selected audio devices and joining that specific channel.** The OS may request microphone permission.
 5. Transmission starts muted. Use headphones; select your intended mode and unmute. Enabling PTT does not itself unmute. Deafen also blocks outgoing audio.
 6. Leave releases capture. Closing the window keeps an active call resident; use the tray to reopen or Quit to exit.
 
 Server mute/deafen/suppression is respected. A server move, channel change or uncertain access stops audio rather than automatically undoing the change. Select/rejoin explicitly after checking access. Device changes apply at the next Join. Transient network/device failures use bounded recovery of the same authorized session and pinned devices; mute is preserved and PTT is reset. Invalid/ambiguous sessions, server revocation and exhausted retries require explicit reconnect/rejoin. See [Recovery boundaries](USING.md#recovery-boundaries).
+
+### Login and account sync
+
+Discord’s standard OAuth scopes can identify an account and list basic guild information, but its `voice` scope requires approved-partner access. That sign-in cannot authorize this adapter. No supported export or synchronization of the installed Discord client’s session credential is provided. Enter only a credential you already have and are authorized to use, locally in the masked field; this project supplies no credential extraction procedure. Optional Keychain storage avoids repeating entry after a successful connection.
 
 ## Limits
 

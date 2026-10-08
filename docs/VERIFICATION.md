@@ -1,3 +1,13 @@
+# Account flow and compact UI follow-up, 2026-10-08
+
+The signed-out view now uses a centered account form instead of empty server and call panels. Session entry and explicit Keychain reconnect have separate tabs. Risk acceptance still gates both actions; changing tabs does not load credentials, and password undo history is cleared on either path. Connected accounts retain channel navigation, participant states, text composition and persistent mute/deafen/PTT/leave controls with tighter spacing. Diagnostic details remain in Settings. The obsolete startup screenshot was removed from the README because it no longer represents the current layout.
+
+Local format and strict Clippy checks, all 77 deterministic tests, the release build and Mac bundle/signature validation passed. No new tests were added for this presentation change; existing privacy and authorization regression checks remain intact.
+
+Current Discord OAuth documentation confirms that the `voice` scope requires approved-partner access. Standard identity/guild OAuth cannot authorize this adapter. No supported installed-client credential export or account sync was added. No credential was read or entered, and no outgoing Discord content was sent.
+
+Computer-use inventory reported Fastdistord and Spotifast running. Read-only selection of the existing Fastdistord app via `cua.getApp("me.uzgoren.fastdistord")` was canceled by the user after 5959.5 seconds, before window content was returned. It was not retried. Visual layout, keyboard traversal, resizing and native accessibility remain unverified for this follow-up; the prior Linux GUI check below applies only to its older UI.
+
 # Native Mac continuation, 2026-10-08
 
 The Mac checkout began at `bb9536ba5b2356e81ba59bdb29e6184d10a0eb6e`. The interrupted account/messaging edits were preserved and integrated with text-channel selection, manual history refresh and explicit plain-text Send. Pending history requests are canceled on scope changes; stale results cannot replace the current account/channel snapshot. A regression test checks that scope changes erase displayed text and cancel pending reads without altering voice mute state.

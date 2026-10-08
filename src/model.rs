@@ -79,8 +79,7 @@ impl Default for UiState {
             channels: vec![],
             participants: vec![],
             phase: Phase::Offline,
-            status: "Connect an account to begin. Unofficial access is disabled until you opt in."
-                .into(),
+            status: String::new(),
             selected_guild: None,
             selected_channel: None,
             muted: true,

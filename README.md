@@ -4,7 +4,7 @@
 
 [Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Contribute](CONTRIBUTING.md)
 
-![Native Linux app, shown offline without an account connected](docs/images/offline-startup.png)
+The sign-in screen offers local session entry or explicit macOS Keychain reconnect. Connected accounts show servers, channels and persistent call controls.
 
 ## Download and install
 

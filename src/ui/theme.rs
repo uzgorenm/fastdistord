@@ -50,8 +50,8 @@ pub(super) fn install(ctx: &egui::Context) {
     style.visuals.widgets.active.bg_fill = Color32::from_rgb(58, 70, 99);
     style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT);
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.5, ACCENT);
-    style.spacing.item_spacing = Vec2::new(8.0, 7.0);
-    style.spacing.button_padding = Vec2::new(10.0, 7.0);
+    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+    style.spacing.button_padding = Vec2::new(10.0, 6.0);
     style.spacing.interact_size = Vec2::new(34.0, 30.0);
     style.spacing.slider_width = 105.0;
     style
