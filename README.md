@@ -8,15 +8,9 @@ The sign-in screen offers local session entry or explicit macOS Keychain reconne
 
 ## Download and install
 
-**Version 0.01** — private repository access is required.
+Version **0.01** is being verified and has not been published as a GitHub Release yet. Hosted download links will be added after the actual packages are available. For now, [build from source](#build-from-source).
 
-| Platform | Installer |
-|---|---|
-| macOS Apple Silicon | [DMG](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/Fastdistord-0.01-macos-arm64.dmg) |
-| Windows x64 | [EXE installer](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/Fastdistord-0.01-windows-x64-setup.exe) |
-| Ubuntu 24.04 / compatible Debian amd64 | [Debian package](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/fastdistord-0.01-linux-amd64.deb) |
-
-[Release and checksums](https://github.com/uzgorenm/fastdistord/releases/tag/v0.01). Mac: open the DMG and drag the app to Applications. Windows: run the installer. Linux: `sudo apt install ./fastdistord-0.01-linux-amd64.deb`. Mac/Windows downloads are not notarized/vendor-signed.
+Packages: Mac Apple Silicon DMG, Windows x64 EXE installer, and a Linux amd64 Debian package for Ubuntu 24.04 or compatible systems. Mac/Windows packages are not notarized/vendor-signed.
 
 ## Features
 
