@@ -112,7 +112,7 @@ impl PersonalAccount {
     pub async fn friends(&self) -> Result<Vec<Friend>> {
         social::parse_friends(&self.get("/users/@me/relationships").await?)
     }
-    pub async fn direct_channels(&self) -> Result<Vec<DirectChannel>> {
+    pub async fn direct_channels(&self) -> Result<social::DirectChannelsSnapshot> {
         social::parse_direct_channels(&self.get("/users/@me/channels").await?)
     }
     /// Only from selecting a friend. Reuses an existing DM when present.

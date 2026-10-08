@@ -598,10 +598,20 @@ fn checked_endpoint(raw: &str) -> Result<String> {
     }
     match port {
         None | Some("443") => Ok(host),
-        // :80 has appeared in Discord Gateway voice updates; it is still
-        // contacted with TLS, never an insecure ws:// fallback.
-        Some(port @ ("80" | "2048")) => Ok(format!("{host}:{port}")),
-        _ => bail!("Discord supplied an unsupported voice server port. Rejoin voice."),
+        Some(port) => {
+            // The authenticated account Gateway chooses the WSS authority.
+            // Discord does not define a fixed signaling-port allowlist. This
+            // port is separate from the UDP media port in Voice Ready.
+            let valid = !port.is_empty()
+                && port.len() <= 5
+                && !port.starts_with('0')
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|n| n != 0);
+            if !valid {
+                bail!("Discord supplied a malformed voice server port. No connection attempted.");
+            }
+            Ok(format!("{host}:{port}"))
+        }
     }
 }
 
@@ -680,6 +690,9 @@ mod tests {
                 "eu-central396.discord.media:80",
                 "eu-central396.discord.media:80",
             ),
+            ("voice.discord.media:8443", "voice.discord.media:8443"),
+            ("voice.discord.media:50000", "voice.discord.media:50000"),
+            ("voice.discord.media:65535", "voice.discord.media:65535"),
             ("voice.discord.gg", "voice.discord.gg"),
             ("wss://VOICE.DISCORD.MEDIA:443", "voice.discord.media"),
         ] {
@@ -689,12 +702,10 @@ mod tests {
         }
     }
     #[test]
-    fn rejects_unrecognized_or_malformed_voice_ports() {
+    fn rejects_noncanonical_or_out_of_range_voice_ports() {
         for port in [
             "",
             "0",
-            "22",
-            "8080",
             "65536",
             "-443",
             "+443",

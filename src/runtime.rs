@@ -58,10 +58,8 @@ enum ResultEvent {
     Social(
         u64,
         u64,
-        Result<(
-            Vec<crate::social::Friend>,
-            Vec<crate::social::DirectChannel>,
-        )>,
+        Result<Vec<crate::social::Friend>>,
+        Result<crate::social::DirectChannelsSnapshot>,
     ),
     OpenedDm(u64, u64, Result<crate::social::DirectChannel>),
     Ring(u64, Result<()>),
@@ -423,10 +421,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 s.social_status = "Loading friends and conversations…".into();
                             });
                             chat_task = Some(tokio::spawn(async move {
-                                let result =
-                                    async { Ok((c.friends().await?, c.direct_channels().await?)) }
-                                        .await;
-                                let _ = tx.send(ResultEvent::Social(id, request, result)).await;
+                                let (friends, channels) =
+                                    tokio::join!(c.friends(), c.direct_channels());
+                                let _ = tx
+                                    .send(ResultEvent::Social(id, request, friends, channels))
+                                    .await;
                             }));
                         }
                     }
@@ -819,22 +818,14 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
             }
             Incoming::Result(event) => match event {
-                Some(ResultEvent::Social(id, request, result))
+                Some(ResultEvent::Social(id, request, friends, channels))
                     if id == generation
                         && request == chat_generation
                         && snapshot(&state).selected_guild.is_none() =>
                 {
                     chat_task.take();
                     update(&state, &repaint, |s| {
-                        s.social_busy = false;
-                        match result {
-                            Ok((friends, channels)) => {
-                                s.friends = friends;
-                                s.direct_channels = channels;
-                                s.social_status.clear();
-                            }
-                            Err(error) => s.social_status = error.to_string(),
-                        }
+                        apply_social_snapshot(s, friends, channels)
                     });
                 }
                 Some(ResultEvent::OpenedDm(id, request, result))
@@ -1608,6 +1599,37 @@ fn may_send_voice_flags(
 ) -> bool {
     signaling_ready && voice_active && authority_current
 }
+fn apply_social_snapshot(
+    state: &mut UiState,
+    friends: Result<Vec<crate::social::Friend>>,
+    channels: Result<crate::social::DirectChannelsSnapshot>,
+) {
+    state.social_busy = false;
+    let mut notices = Vec::new();
+    match friends {
+        Ok(friends) => state.friends = friends,
+        Err(error) => {
+            state.friends.clear();
+            notices.push(format!("Friends could not load: {error}"));
+        }
+    }
+    match channels {
+        Ok(snapshot) => {
+            state.direct_channels = snapshot.channels;
+            if snapshot.skipped > 0 {
+                notices.push(format!(
+                    "{} unsupported conversations hidden.",
+                    snapshot.skipped
+                ));
+            }
+        }
+        Err(error) => {
+            state.direct_channels.clear();
+            notices.push(format!("Conversations could not load: {error}"));
+        }
+    }
+    state.social_status = notices.join(" ");
+}
 fn chat_channel_allowed(s: &UiState, channel: u64) -> bool {
     if s.selected_guild.is_none() {
         s.selected_dm == Some(channel) && s.direct_channels.iter().any(|c| c.id == channel)
@@ -1776,6 +1798,47 @@ mod tests {
         assert!(voice_state_matches(&moved, &pending, Some(42)));
         assert!(!voice_state_matches(&moved, &pending, Some(43)));
         assert!(!voice_state_matches(&moved, &pending, None));
+    }
+    #[test]
+    fn failed_conversation_fetch_preserves_independently_loaded_friends() {
+        let mut state = UiState {
+            social_busy: true,
+            ..Default::default()
+        };
+        apply_social_snapshot(
+            &mut state,
+            Ok(vec![crate::social::Friend {
+                id: 20,
+                name: "Friend".into(),
+            }]),
+            Err(anyhow::anyhow!("Unavailable")),
+        );
+        assert_eq!(state.friends[0].id, 20);
+        assert!(state.direct_channels.is_empty());
+        assert!(!state.social_busy);
+        assert!(state.social_status.contains("Conversations could not load"));
+        apply_social_snapshot(
+            &mut state,
+            Err(anyhow::anyhow!("Unavailable")),
+            Ok(crate::social::DirectChannelsSnapshot {
+                channels: vec![crate::social::DirectChannel {
+                    id: 30,
+                    name: "DM".into(),
+                    recipients: vec![crate::social::Friend {
+                        id: 40,
+                        name: "Recipient".into(),
+                    }],
+                }],
+                skipped: 1,
+            }),
+        );
+        assert!(state.friends.is_empty());
+        assert_eq!(state.direct_channels[0].id, 30);
+        assert!(
+            state
+                .social_status
+                .contains("1 unsupported conversations hidden")
+        );
     }
     #[test]
     fn dm_sends_require_selected_known_private_channel() {

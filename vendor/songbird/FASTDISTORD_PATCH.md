@@ -57,13 +57,17 @@ reference https://docs.discord.food/topics/voice-connections, rather than
 Discord's official bot API documentation; live user-account compatibility is
 still unverified.
 
-The application accepts strictly validated Discord voice authorities with no
-port, TLS port 443, documented port 2048, or the historically observed port 80.
-Songbird always connects with WSS and keeps explicit nondefault ports. The
-official example is in https://docs.discord.com/developers/topics/voice-connections;
-the port-80 report is https://github.com/discord/discord-api-docs/issues/1694.
-Other ports, schemes, hosts, credentials, paths and malformed DNS labels fail
-without echoing the supplied address.
+The application accepts strictly validated Discord voice authorities with an
+optional canonical decimal port in 1..65535. Songbird keeps explicit ports in
+its WSS URL; the authenticated Gateway selects that signaling authority. The
+UDP media address/port arrives separately in Voice Ready. An earlier fixed
+443/80/2048 allowlist rejected the user's live endpoint and was removed; no port
+is guessed or silently stripped. WSS, certificate verification and the Discord
+hostname suffix restriction remain mandatory. Other schemes/hosts, userinfo,
+paths, IP literals, malformed DNS labels and malformed/out-of-range ports fail
+without echoing the supplied address. See the official endpoint example and
+separate UDP Ready payload in
+https://docs.discord.com/developers/topics/voice-connections.
 
 The application transport tests cover credential-safe diagnostics, endpoint
 validation, channel-ID mapping, invalid IDs, and capture-epoch revocation.

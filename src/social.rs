@@ -18,6 +18,10 @@ pub struct DirectChannel {
     pub name: String,
     pub recipients: Vec<Friend>,
 }
+pub struct DirectChannelsSnapshot {
+    pub channels: Vec<DirectChannel>,
+    pub skipped: usize,
+}
 pub fn parse_friends(value: &Value) -> Result<Vec<Friend>> {
     let Some(values) = value.as_array().filter(|v| v.len() <= MAX_SOCIAL) else {
         bail!("Discord returned an invalid or oversized friends list.");
@@ -30,13 +34,13 @@ pub fn parse_friends(value: &Value) -> Result<Vec<Friend>> {
             continue;
         }
         let Some(id) = snowflake(&relationship["user"]["id"]) else {
-            bail!("Discord returned an invalid friend.");
+            continue;
         };
         if relationship
             .get("id")
             .is_some_and(|v| snowflake(v) != Some(id))
         {
-            bail!("Discord returned inconsistent friend IDs.");
+            continue;
         }
         if seen.insert(id) {
             friends.push(Friend {
@@ -53,22 +57,26 @@ pub fn parse_friends(value: &Value) -> Result<Vec<Friend>> {
     });
     Ok(friends)
 }
-pub fn parse_direct_channels(value: &Value) -> Result<Vec<DirectChannel>> {
+pub fn parse_direct_channels(value: &Value) -> Result<DirectChannelsSnapshot> {
     let Some(values) = value.as_array().filter(|v| v.len() <= MAX_SOCIAL) else {
         bail!("Discord returned invalid or oversized conversations.");
     };
     let mut seen = HashSet::new();
     let mut channels = Vec::new();
+    let mut skipped = 0;
     for value in values {
-        if !matches!(value["type"].as_u64(), Some(1 | 3)) {
+        // List snapshots may contain partial/unsupported channels. No recipient
+        // IDs are guessed or filled from relationships: only validated objects
+        // enter the send/call scope. Explicit open-DM responses stay strict.
+        let Ok(channel) = parse_direct_channel(value) else {
+            skipped += 1;
             continue;
-        }
-        let channel = parse_direct_channel(value)?;
+        };
         if seen.insert(channel.id) {
             channels.push(channel);
         }
     }
-    Ok(channels)
+    Ok(DirectChannelsSnapshot { channels, skipped })
 }
 pub fn parse_direct_channel(value: &Value) -> Result<DirectChannel> {
     if !matches!(value["type"].as_u64(), Some(1 | 3))
@@ -136,7 +144,43 @@ mod tests {
         let friends = parse_friends(&values).unwrap();
         assert_eq!(friends.len(), 1);
         assert_eq!(friends[0].id, 1);
-        assert!(parse_friends(&json!([{"id":"9","type":1,"user":{"id":"1"}}])).is_err());
+        assert!(
+            parse_friends(&json!([{"id":"9","type":1,"user":{"id":"1"}}]))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn partial_empty_and_unsupported_channels_do_not_erase_valid_conversations() {
+        let values = json!([
+            {"id":"10","type":1,"recipients":[{"id":"20","username":"Friend"}]},
+            {"id":"11","type":3,"recipients":[]},
+            {"id":"12","type":1},
+            {"id":"13","type":1,"recipients":["20"]},
+            {"id":"14","type":1,"recipient_ids":["20"]},
+            {"id":"15","type":18,"recipients":[{"id":"20"}]},
+            {"id":"16","type":3,"recipients":[{"id":"20"},{"id":"30"}]},
+            {"id":"17","type":1,"recipients":[{"id":"20"},{"id":"30"}]}
+        ]);
+        let parsed = parse_direct_channels(&values).unwrap();
+        assert_eq!(
+            parsed.channels.iter().map(|c| c.id).collect::<Vec<_>>(),
+            [10, 16]
+        );
+        assert_eq!(parsed.skipped, 6);
+        assert_eq!(parsed.channels[0].recipients[0].id, 20);
+        assert!(parse_direct_channels(&json!({})).is_err());
+        assert!(parse_direct_channels(&json!(vec![json!({}); MAX_SOCIAL + 1])).is_err());
+    }
+    #[test]
+    fn malformed_accepted_relationship_does_not_erase_other_friends() {
+        let parsed = parse_friends(&json!([
+            {"type":1,"user":{"id":"0"}},
+            {"type":1,"id":"90","user":{"id":"20"}},
+            {"type":1,"id":"30","user":{"id":"30","username":"Friend"}}
+        ]))
+        .unwrap();
+        assert_eq!(parsed.iter().map(|f| f.id).collect::<Vec<_>>(), [30]);
     }
     #[test]
     fn dm_response_cannot_redirect_to_guild_or_different_recipient() {
