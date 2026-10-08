@@ -55,7 +55,7 @@ jobs:
           test "$("$MOUNT/Fastdistord.app/Contents/MacOS/fastdistord" --version)" = 'fastdistord 0.01'
           test "$(readlink "$MOUNT/Applications")" = /Applications
           cmp LICENSE "$MOUNT/LICENSE.txt"
-          cmp target/release/fastdistord "$MOUNT/Fastdistord.app/Contents/MacOS/fastdistord"
+          cmp dist/Fastdistord.app/Contents/MacOS/fastdistord "$MOUNT/Fastdistord.app/Contents/MacOS/fastdistord"
       - name: Linux package and install/uninstall smoke
         if: runner.os == 'Linux'
         run: |
