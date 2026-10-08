@@ -401,7 +401,14 @@ impl AuxNetwork {
                                 .collect::<Vec<_>>(),
                         ),
                     ) {
-                        Ok(result) => result,
+                        Ok(result) => {
+                            if result.is_none() {
+                                self.config
+                                    .dave_handshake
+                                    .record(crate::DaveStage::ProposalsPending, 27);
+                            }
+                            result
+                        }
                         Err(e) => {
                             self.config.invalidate_dave();
                             self.config
@@ -412,19 +419,22 @@ impl AuxNetwork {
                         }
                     }
                 } else {
+                    self.config
+                        .dave_handshake
+                        .record(crate::DaveStage::ProposalsWithoutSession, 27);
                     None
                 };
 
                 if let Some(commit_welcome) = result {
-                    self.config
-                        .dave_handshake
-                        .record(crate::DaveStage::CommitSent, 28);
                     self.ws_client
                         .send_binary(&GatewayEvent::from(DaveMlsCommitWelcome {
                             commit: commit_welcome.commit,
                             welcome: commit_welcome.welcome,
                         }))
                         .await?;
+                    self.config
+                        .dave_handshake
+                        .record(crate::DaveStage::CommitSent, 28);
                 }
             }
             GatewayEvent::DaveMlsAnnounceCommitTransition(ev) => {

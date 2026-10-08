@@ -16,6 +16,10 @@ pub enum DaveStage {
     ExternalSender,
     /// Proposals received.
     Proposals,
+    /// Proposals processed without a candidate commit.
+    ProposalsPending,
+    /// Proposals ignored because no local session exists.
+    ProposalsWithoutSession,
     /// Commit and optional welcome sent.
     CommitSent,
     /// Commit accepted locally.
@@ -44,6 +48,8 @@ struct State {
     peers: usize,
     roster: Option<usize>,
     external: bool,
+    proposals: bool,
+    commit_sent: bool,
     prepared: bool,
     ready: bool,
     failed: bool,
@@ -61,6 +67,8 @@ impl Default for DaveHandshake {
             peers: 1,
             roster: None,
             external: false,
+            proposals: false,
+            commit_sent: false,
             prepared: false,
             ready: false,
             failed: false,
@@ -81,6 +89,8 @@ impl DaveHandshake {
                 peers: 1,
                 roster,
                 external: false,
+                proposals: false,
+                commit_sent: false,
                 prepared: false,
                 ready: false,
                 failed: false,
@@ -116,12 +126,16 @@ impl DaveHandshake {
                 DaveStage::Protocol => s.protocol = value,
                 DaveStage::Epoch => {
                     s.protocol = value;
+                    s.proposals = false;
+                    s.commit_sent = false;
                     s.prepared = false;
                     s.ready = false;
                     s.failed = false;
                 }
                 DaveStage::Peers => s.peers = usize::from(value),
                 DaveStage::ExternalSender => s.external = true,
+                DaveStage::Proposals => s.proposals = true,
+                DaveStage::CommitSent => s.commit_sent = true,
                 DaveStage::CommitAccepted | DaveStage::WelcomeAccepted => {
                     s.prepared = true;
                     s.failed = false;
@@ -164,8 +178,12 @@ impl DaveHandshake {
             "Waiting for transition execution"
         } else if !s.external {
             "Waiting for external sender"
+        } else if s.commit_sent {
+            "Waiting for server acceptance of MLS commit or welcome"
+        } else if s.proposals {
+            "MLS proposals received; waiting for commit or welcome"
         } else {
-            "Waiting for MLS commit or welcome"
+            "Waiting for MLS proposals or welcome"
         };
         let roster = s.roster.map_or_else(|| "unknown".into(), |n| n.to_string());
         format!(
@@ -206,6 +224,20 @@ mod tests {
         state.record(DaveStage::MlsFailed, 30);
         assert!(!state.idle_without_peer());
         assert!(state.failed());
+    }
+    #[test]
+    fn distinguishes_missing_proposals_from_unaccepted_commit() {
+        let state = DaveHandshake::default();
+        state.record(DaveStage::Protocol, 1);
+        state.record(DaveStage::ExternalSender, 25);
+        assert!(state.summary().starts_with("Waiting for MLS proposals"));
+        state.record(DaveStage::Proposals, 27);
+        assert!(state.summary().starts_with("MLS proposals received"));
+        state.record(DaveStage::CommitSent, 28);
+        assert!(state.summary().starts_with("Waiting for server acceptance"));
+        state.record(DaveStage::Epoch, 1);
+        assert!(state.summary().starts_with("Waiting for MLS proposals"));
+        assert!(!state.idle_without_peer());
     }
     #[test]
     fn trace_is_opt_in_bounded_and_join_scoped() {
