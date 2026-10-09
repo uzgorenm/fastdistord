@@ -1762,14 +1762,17 @@ impl VoiceApp {
                 for tabs in SettingsTab::ALL.as_chunks::<3>().0 {
                     ui.horizontal(|ui| {
                         for &tab in tabs {
-                            if ui.add(egui::Button::selectable(self.settings_tab == tab, tab.label()).min_size(Vec2::new(tab_width,32.0))).clicked() { self.settings_tab = tab; }
+                            let response = ui.add(egui::Button::selectable(self.settings_tab == tab, tab.label()).min_size(Vec2::new(tab_width,32.0)));
+                            if response.clicked() { response.request_focus(); self.settings_tab = tab; }
                         }
                     });
                 }
                 if previous == SettingsTab::Audio && previous != self.settings_tab {
                     self.send(Command::StopMicTest);
                 }
+                ui.add_space(8.0);
                 ui.separator();
+                ui.add_space(8.0);
                 if !state.preferences_status.is_empty() { ui.label(&state.preferences_status); }
                 if let Some(error) = &self.local_error { ui.colored_label(theme::colors(ui.ctx()).danger, error); }
                 // The bottom panel reserves actions before this category consumes remaining space.
@@ -1779,10 +1782,10 @@ impl VoiceApp {
                     .max_height(scroll_height)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
                         match self.settings_tab {
                             SettingsTab::Audio => {
-                ui.label(RichText::new("Audio devices").font(fastframe_fonts::Weight::SemiBold.font_id(theme::size(ui.ctx(), 16.0))));
-                ui.add_space(9.0);
+                settings_heading(ui, "Audio devices", "Choose where your voice comes from and where you hear the call.");
                 ui.label("Microphone");
                 device_picker(ui, "input_device", &mut self.selected_input, &state.input_devices);
                 ui.add_space(9.0);
@@ -1804,7 +1807,8 @@ impl VoiceApp {
                 });
                 ui.add_space(10.0);
                 ui.label(RichText::new("Saved devices are used on your next call. Leave and rejoin to switch devices during a call.").size(theme::size(ui.ctx(), 12.0)).color(theme::colors(ui.ctx()).secondary));
-                ui.add_space(12.0);
+                settings_divider(ui);
+                settings_heading(ui, "Call audio", "Control how you speak and what you hear.");
                 let mut ptt = state.ptt_enabled;
                 if ui.checkbox(&mut ptt, "Push-to-talk").changed() {
                     self.release_ptt();
@@ -1820,12 +1824,12 @@ impl VoiceApp {
                 let mut sound_volume = state.sound_volume;
                 if ui.add_enabled(call_sounds, egui::Slider::new(&mut sound_volume, 0.0..=1.0).text("Call sound volume")).changed() { self.send(Command::SetSoundVolume(sound_volume)); }
                 if let Some(error) = &self.sound_error { ui.label(RichText::new(error).size(theme::size(ui.ctx(), 12.0)).color(theme::colors(ui.ctx()).danger)); }
-                ui.separator();
-                ui.label(RichText::new("Microphone test & processing").strong());
+                settings_divider(ui);
+                settings_heading(ui, "Microphone test", "Check your microphone before joining a call.");
 
                     use crate::mic_test::TestPhase;
                     let test = &state.mic_test;
-                    ui.label("Record up to five seconds locally, then play it back. Nothing is sent or saved to disk.");
+                    settings_description(ui, "Record up to five seconds locally, then play it back. Nothing is sent or saved to disk.");
                     ui.label(format!("{:?} · {:.1} / {:.0} s", test.phase, test.elapsed_seconds, test.duration_seconds));
                     if !test.input_name.is_empty() { ui.label(&test.input_name); }
                     if let Some(error) = &test.error { ui.colored_label(theme::colors(ui.ctx()).danger, error); }
@@ -1834,19 +1838,25 @@ impl VoiceApp {
                         if ui.add_enabled(test.phase == TestPhase::Ready, egui::Button::new("Play test")).clicked() { self.send(Command::PlayMicTest); }
                         if ui.add_enabled(test.phase != TestPhase::Idle, egui::Button::new("Stop & erase")).clicked() { self.send(Command::StopMicTest); }
                     });
+                    settings_divider(ui);
+                    settings_heading(ui, "Voice processing", "Optional adjustments for your microphone. Both are off by default.");
                     let mut processing = state.preferences.processing;
                     let changed = ui.checkbox(&mut processing.noise_suppression, "Noise suppression").changed()
                         | ui.checkbox(&mut processing.automatic_gain, "Automatic microphone gain").changed();
                     if changed { self.send(Command::SetProcessing(processing)); }
-                    ui.label("Processing changes apply on the next call or microphone test. Echo cancellation is unavailable; use headphones.");                ui.label(state.microphone_permission.label());
+                    settings_description(ui, "Processing changes apply on the next call or microphone test. Echo cancellation is unavailable; use headphones.");
+                ui.add_space(8.0);                ui.label(state.microphone_permission.label());
                 if matches!(state.microphone_permission, crate::microphone::Permission::Denied | crate::microphone::Permission::Restricted) {
                     ui.label("Allow microphone access in System Settings → Privacy & Security → Microphone, then rejoin.");
                 }
                             }
                             SettingsTab::Appearance => {
 
+                    settings_heading(ui, "Theme", "Choose the appearance of the app.");
                     let mut appearance = state.preferences.appearance;
                     let mut changed = ui.checkbox(&mut appearance.light_theme, "Light theme").changed();
+                    settings_divider(ui);
+                    settings_heading(ui, "Reading & spacing", "Adjust conversation density and text size.");
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Message spacing");
                         changed |= ui.selectable_value(&mut appearance.density, crate::preferences::MessageDensity::Compact, "Compact").changed();
@@ -1865,10 +1875,12 @@ impl VoiceApp {
                             SettingsTab::Shortcuts => {
 
                     use crate::shortcuts::{ShortcutAction, ShortcutKey, ShortcutModifiers, ShortcutScope};
+                    settings_heading(ui, "Key bindings", "Choose an action, where it works, and its key combination.");
                     let mut config = state.preferences.shortcuts;
                     for action in ShortcutAction::ALL {
                         ui.push_id(action.label(), |ui| {
-                            ui.label(action.label());
+                            ui.add_space(6.0);
+                            ui.label(RichText::new(action.label()).font(fastframe_fonts::Weight::SemiBold.font_id(theme::size(ui.ctx(), 14.0))));
                             let binding = config.binding_mut(action);
                             ui.horizontal_wrapped(|ui| {
                                 egui::ComboBox::from_id_salt("scope").selected_text(binding.scope.label()).show_ui(ui, |ui| { for value in ShortcutScope::ALL { ui.selectable_value(&mut binding.scope, value, value.label()); } });
@@ -1884,13 +1896,17 @@ impl VoiceApp {
                         }
                     }
                     ui.label(self.ptt.status());
-                    ui.label("Window shortcuts pause while typing. Global shortcuts require explicit opt in. Hold to talk releases when focus or input state is lost.");                            }
+                    settings_divider(ui);
+                    settings_description(ui, "Window shortcuts pause while typing. Global shortcuts require explicit opt in. Hold to talk releases when focus or input state is lost.");                            }
                             SettingsTab::Notifications => {
 
+                    settings_heading(ui, "Call notifications", "Show incoming calls outside the app when enabled and permitted.");
                     let mut enabled = state.preferences.desktop_notifications;
                     if ui.checkbox(&mut enabled, "Desktop call notifications").changed() { self.send(Command::SetDesktopNotifications(enabled)); }
                     if ui.button("Request notification permission").clicked() { self.send(Command::RequestNotificationPermission); }
                     ui.label(&state.notification_status);
+                    settings_divider(ui);
+                    settings_heading(ui, "App updates", "Check for a newer version without downloading it automatically.");
                     let mut checks = state.preferences.check_updates;
                     if ui.checkbox(&mut checks, "Check for updates at startup").changed() { self.send(Command::SetUpdateChecks(checks)); }
                     if ui.add_enabled(!matches!(state.update_state, crate::updates::UpdateState::Checking), egui::Button::new("Check now")).clicked() { self.send(Command::CheckForUpdates); }
@@ -1898,11 +1914,13 @@ impl VoiceApp {
                     if let crate::updates::UpdateState::Available { version, url } = &state.update_state { ui.hyperlink_to(format!("View {version}"), url); }
                     else { ui.hyperlink_to("Releases", crate::updates::RELEASES_URL); }                            }
                             SettingsTab::Account => {
+                                settings_heading(ui, "Connected account", "Your current Discord login.");
                                 if let Some(account) = &state.account {
                                     ui.horizontal(|ui| { ui.spacing_mut().item_spacing.x = AVATAR_NAME_GAP; self.profile_avatar(ui,state,account.id,&account.name,false); ui.label(RichText::new(&account.name).strong()); });
                                 } else { ui.label("No account connected."); }
                                 if !state.login_storage_status.is_empty() { ui.label(&state.login_storage_status); }
-                                ui.add_space(12.0);
+                                settings_divider(ui);
+                                settings_heading(ui, "Sign out", "Disconnect this account and remove remembered access on Mac.");
                     if ui.add_enabled(state.account.is_some(), egui::Button::new(if cfg!(target_os = "macos") { "Log out & forget login" } else { "Log out" })).clicked() {
                         self.release_ptt();
                         self.token.zeroize();
@@ -1917,10 +1935,12 @@ impl VoiceApp {
                             }
                             SettingsTab::About => {
 
+                    settings_heading(ui, "Fastdistord", "A small native Discord client.");
                     ui.label(RichText::new("built with vibes by Mehmet Serhat Uzgoren").size(theme::size(ui.ctx(), 12.0)).color(theme::colors(ui.ctx()).secondary));
                     ui.label(RichText::new(format!("Build {}", option_env!("FASTDISTORD_BUILD_COMMIT").unwrap_or("development"))).size(theme::size(ui.ctx(), 12.0)).color(theme::colors(ui.ctx()).secondary));
                     ui.label("Unofficial Discord client. Personal-account access may break or lead to account restrictions.");                                ui.add_space(12.0);
-                                ui.collapsing("Privacy & diagnostics", |ui| {
+                                settings_divider(ui);
+                                ui.collapsing(RichText::new("Privacy & diagnostics").font(fastframe_fonts::Weight::SemiBold.font_id(theme::size(ui.ctx(), 16.0))), |ui| {
 
                     ui.label("Use headphones. Echo cancellation is not available.");
                     let mut tracing = state.voice_handshake.enabled();
@@ -2246,6 +2266,29 @@ fn chat_label(state: &UiState, channel: Option<u64>, name: &str) -> String {
 }
 
 // One focusable hit target owns both avatar and label; children only paint/hover.
+fn settings_heading(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(
+        RichText::new(title)
+            .font(fastframe_fonts::Weight::SemiBold.font_id(theme::size(ui.ctx(), 17.0))),
+    );
+    settings_description(ui, description);
+    ui.add_space(4.0);
+}
+
+fn settings_description(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .size(theme::size(ui.ctx(), 13.0))
+            .color(theme::colors(ui.ctx()).secondary),
+    );
+}
+
+fn settings_divider(ui: &mut egui::Ui) {
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(12.0);
+}
+
 fn avatar_row(
     ui: &mut egui::Ui,
     selected: bool,
@@ -2870,6 +2913,34 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Command::StopMicTest)));
         assert!(rx.try_recv().is_err());
     }
+    // The fixed category strip must remain reachable through standard Tab/Enter navigation.
+    #[test]
+    fn settings_category_tabs_support_keyboard_navigation() {
+        let (mut app, _rx) = fixture(UiState::default());
+        app.settings_open = true;
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ui_frame(&mut app, &ctx, vec![]);
+        click_label(&mut app, &ctx, "Voice & Audio");
+        for key in [egui::Key::Tab, egui::Key::Enter] {
+            for pressed in [true, false] {
+                ui_frame(
+                    &mut app,
+                    &ctx,
+                    vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+        }
+        assert_eq!(app.settings_tab, SettingsTab::Notifications);
+        assert!(app.settings_open);
+    }
+
     // Both avatar and name must activate the same one command, without duplicated actions.
     #[test]
     fn avatar_and_name_share_one_conversation_hit_target() {

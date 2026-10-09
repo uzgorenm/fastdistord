@@ -4,7 +4,7 @@
 
 Use `open dist/latest/Fastdistord.app` after a local bundle build. Settings → About shows the source commit so you can identify the running build.
 
-Settings separates Voice & Audio, Notifications, Shortcuts, Appearance, Account and About into tabs. Each category scrolls independently when needed. Clicking either a friend’s avatar or name selects the same conversation.
+Settings separates Voice & Audio, Notifications, Shortcuts, Appearance, Account and About into tabs. Section headings group related controls; descriptions explain their scope. Each category scrolls independently when needed, while Done and Quit stay visible. Clicking either a friend’s avatar or name selects the same conversation.
 
 Remember me saves to macOS Keychain after a successful login. Quit preserves it; startup restores it without joining voice. Existing saved entries can migrate when no preference exists. An explicit session-only login or Logout prevents startup restore. Storage errors appear in the app; approve its macOS Keychain prompt when needed. The ad-hoc signature can cause another prompt after an update. No password is stored in the preference file.
 
