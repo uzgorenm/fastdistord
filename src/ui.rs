@@ -1068,10 +1068,15 @@ impl VoiceApp {
         } else {
             0.0
         };
+        let composer_gap = 4.0;
+        let composer_spacing = composer_gap + 2.0 * ui.spacing().item_spacing.y;
         egui::ScrollArea::vertical()
             .id_salt(("messages", channel_id))
-            .max_height((ui.available_height() - composer_height - 36.0 - counter_height).max(60.0))
-            .auto_shrink([false, false])
+            .max_height(
+                (ui.available_height() - composer_height - composer_spacing - counter_height)
+                    .max(60.0),
+            )
+            .auto_shrink([false, true])
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -1131,7 +1136,7 @@ impl VoiceApp {
                     ui.label(RichText::new("No messages yet.").color(theme::SECONDARY));
                 }
             });
-        ui.add_space(12.0);
+        ui.add_space(composer_gap);
         ui.horizontal(|ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("composer", channel_id))

@@ -1,3 +1,16 @@
+# Composer spacing, 2026-10-09
+
+Short conversation histories now shrink to their content instead of reserving
+the entire available viewport above the composer. The explicit gap falls from
+12 to 4 pixels, and the height budget uses the actual layout spacing instead of
+a fixed 36-pixel allowance. Overflow scrolling, bottom sticking, multiline input,
+draft preservation, message grouping and footer controls remain in place.
+
+Synthetic headless renders were checked at normal and narrow widths, with long
+names, multiline input and an active-call layout. Formatting, strict Clippy,
+all 136 offline tests and the nine standalone DAVE checks passed. No native app
+interaction, microphone or live call was automated for this change.
+
 # Received DAVE payload bounds, 2026-10-09
 
 The user confirmed that the other participant could hear them on build
