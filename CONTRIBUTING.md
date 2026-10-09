@@ -8,7 +8,7 @@ Check existing issues. Include the source commit, OS/architecture, exact steps, 
 
 ## Development checks
 
-Install the prerequisites in [Getting started](docs/GETTING_STARTED.md). Run the same baseline checks as CI:
+Install the prerequisites in [Getting started](docs/GETTING_STARTED.md). Run the local baseline checks:
 
 ```sh
 cargo fmt --all -- --check

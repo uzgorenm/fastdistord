@@ -1,9 +1,9 @@
 Fastdistord 0.01 provides native Discord voice controls and text channels, with fresh mobile-approved QR login and optional macOS Keychain storage.
 
-Downloads:
-- macOS Apple Silicon: open the DMG and drag Fastdistord into Applications. Ad-hoc signed; not Developer ID signed or notarized.
-- Windows x64: per-user EXE installer with Start menu shortcuts and an uninstaller. Not Authenticode signed.
-- Linux amd64: Debian package built on Ubuntu 24.04. Install with `sudo apt install ./fastdistord-0.01-linux-amd64.deb`; requires a compatible Debian/Ubuntu system and GUI/audio libraries.
+Published download:
+- macOS Apple Silicon: open the DMG and drag Fastdistord into Applications. Requires macOS 13 or later. Ad-hoc signed; not Developer ID signed or notarized.
+
+Windows and Linux packages are not included in v0.01. Packaging scripts are retained for future native builds.
 
 Package verification uses local native build hosts; only installers actually built and checked are published. This does not establish native GUI, hardware or live Discord behavior. Voice/text still need live testing. Video/screen-share sending is unfinished; standalone media previews and production diagnostics are not included.
 

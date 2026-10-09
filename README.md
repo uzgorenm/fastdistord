@@ -1,77 +1,42 @@
 # fastdistord
 
-**Discord voice and text in a small native app.** Built with Rust and fastframe, with a focused interface for channels, calls and messages.
+Discord voice and text in a small native Rust app.
 
-[Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Contribute](CONTRIBUTING.md)
+Browse friends and servers, read and send messages, and join voice calls with DAVE encryption, mute, deafen and push-to-talk. The app starts muted. Closing the window keeps a call running when the tray is available; Quit ends it.
 
-The sign-in screen offers fresh QR login with mobile approval or macOS Keychain reconnect. Choose **Remember me** to reconnect on future launches. Use **Friends | Servers** in one sidebar. Friends open conversations; server channels appear beneath the selected server. Click the selected server to collapse or expand its channels. Friends follow recent DM activity; profile controls stay visible while you browse.
+## Download
 
-## Download and install
+[Download 0.01 for Apple Silicon Macs](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/Fastdistord-0.01-macos-arm64.dmg) · [Release notes and checksums](https://github.com/uzgorenm/fastdistord/releases/tag/v0.01)
 
-See [GitHub Releases](https://github.com/uzgorenm/fastdistord/releases) for available downloads. Only assets attached to a release are published packages. Repository access is required while the project is private.
+Requires macOS 13 or later. Open the DMG and drag Fastdistord into Applications. This experimental build is ad-hoc signed and not notarized. Repository access is required while the project is private. Windows and Linux downloads are not available yet.
 
-The native package for version **0.01** targets macOS 13 or later on Apple Silicon. It has a local ad-hoc signature and is not notarized. Windows and Linux downloads are not available for this release; [build from source](#build-from-source) on those platforms.
+## Get started
 
-## Features
+1. Open Fastdistord and choose **Connect with QR code**. Scan with Discord on your phone and approve only a login you started here. **Remember me** saves access in macOS Keychain for future launches; otherwise it stays in memory.
+2. Choose a friend to chat, or **Servers → server → Chat** for text channels. **Send** sends plain text; Enter adds a line.
+3. For voice, choose **Call** in a friend's conversation or **Voice → Join · channel** in a server. Allow microphone access if prompted, wait for encrypted voice readiness, then unmute.
+4. Settings has device selection, volume and push-to-talk. When enabled and unmuted, hold **Ctrl+Shift+Space** or **Hold to talk**. **Leave** releases audio devices; **Log out** also removes remembered access.
 
-- Browse friends, private conversations and server channels in one sidebar
-- Start individual friend calls, with persistent call status, local events and optional sounds
-- Two-way voice with DAVE encryption, mute, deafen and push-to-talk
-- Choose microphones and speakers, check input levels and adjust output volume
-- Stay in a call from the tray where supported, with bounded device/session recovery
-- Read the latest 50 channel or DM messages and send plain text; new messages arrive through the Gateway
-- Connect with a fresh QR code and mobile approval; optional macOS Keychain storage
+See [Controls and troubleshooting](docs/USING.md) for help.
 
-The app starts muted and does not record audio or collect telemetry.
+## Limits
 
-## Open and use
+Personal-account access is unofficial. It may break or lead to Discord account restrictions. Fastdistord is not affiliated with Discord.
 
-1. Launch Fastdistord. You can explore the offline interface without credentials.
-2. Read the account-access sentence, then choose **Connect with QR code**.
-3. Scan the fresh code with Discord on your phone and approve there. Only approve a login you started here. Select **Remember me** to save in macOS Keychain and reconnect on launch. Otherwise the session stays in memory.
-4. Choose **Servers**, then a server and **Join · channel**. Allow microphone access if prompted, confirm encrypted voice readiness and unmute when ready.
-5. Choose a friend to chat; **Call** starts an individual voice call. Enable push-to-talk in Settings, then hold **Ctrl+Shift+Space** or **Hold to talk** while unmuted.
-6. **Disconnect** releases audio devices. Closing the window may keep an active call running; **Quit** ends it.
+Incoming audio, microphone quality, two-way calls and hardware recovery still need live testing. Use headphones: echo cancellation, noise suppression and automatic gain control are not implemented. Video and screen sharing are unfinished. Text supports the latest 50 messages and plain-text sending; attachments, threads, reactions and edits are not supported.
 
-See the [first-call walkthrough](docs/GETTING_STARTED.md#account-and-first-call) and [controls and troubleshooting](docs/USING.md).
+The app does not record audio or collect telemetry. See [verification](docs/VERIFICATION.md) and [media status](docs/MEDIA.md) for what has been tested.
 
-## Current limitations
-
-Personal-account access uses an unofficial integration that may break or lead to Discord account restrictions. Fastdistord is independent and is not affiliated with Discord.
-
-Voice, friend calls and messaging still need live testing. Video and screen-share sending are unfinished. Use headphones: echo cancellation, noise suppression and automatic gain control are not implemented.
-
-See [verification status](docs/VERIFICATION.md), [media status](docs/MEDIA.md) and the [live-test checklist](docs/LIVE_TEST.md) for details.
-
-## Build from source
+## Build and contribute
 
 Install Rust 1.99.0, CMake and the [platform prerequisites](docs/GETTING_STARTED.md#build), then:
 
 ```sh
 cargo build --locked --release
-./target/release/fastdistord
 ```
 
-On Windows, the built executable is `target\release\fastdistord.exe`.
+Run `target/release/fastdistord` (`target\release\fastdistord.exe` on Windows). For a Mac app bundle, see [Packaging](PACKAGING.md). [Contributing](CONTRIBUTING.md) covers local checks and bug reports. Keep credentials and private account details out of reports.
 
-To create and open an Apple Silicon app bundle, run on macOS with Xcode command-line tools:
+## License
 
-```sh
-rustup target add aarch64-apple-darwin
-./scripts/bundle-macos.sh
-open dist/latest/Fastdistord.app
-```
-
-See [Packaging](PACKAGING.md) for bundle details.
-
-## Help and contributing
-
-Start with [Controls and help](docs/USING.md). When reporting a problem, include your OS, app commit, steps and what happened. Keep credentials and private account details out of reports and screenshots.
-
-[Contributing](CONTRIBUTING.md) covers development checks and useful bug reports.
-
-## Acknowledgements and license
-
-Built on [fastframe](https://github.com/crmne/fastframe), egui/winit, CPAL, Rubato, Songbird/Opus and Davey/OpenMLS.
-
-Licensed under [MIT](LICENSE). The vendored Songbird patch retains its [ISC license](vendor/songbird/LICENSE.md) and [modification notes](vendor/songbird/FASTDISTORD_PATCH.md).
+[MIT](LICENSE). Built with [fastframe](https://github.com/crmne/fastframe), egui/winit, CPAL, Rubato, Songbird/Opus and Davey/OpenMLS. Vendored Songbird retains its [ISC license](vendor/songbird/LICENSE.md) and [patch attribution](vendor/songbird/FASTDISTORD_PATCH.md).

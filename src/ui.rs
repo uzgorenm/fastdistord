@@ -1394,14 +1394,14 @@ impl VoiceApp {
                 ui.label("Microphone");
                 device_picker(ui, "input_device", &mut self.selected_input, &state.input_devices);
                 ui.add_space(9.0);
-                ui.label("Headphones / speakers");
+                ui.label("Speakers or headphones");
                 device_picker(ui, "output_device", &mut self.selected_output, &state.output_devices);
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if ui.button("Refresh devices").clicked() {
                         self.send(Command::RefreshDevices);
                     }
-                    if ui.button("Apply devices").clicked() {
+                    if ui.button("Save devices").clicked() {
                         self.release_ptt();
                         self.send(Command::SetDevices {
                             input: self.selected_input.clone(),
@@ -1410,7 +1410,7 @@ impl VoiceApp {
                     }
                 });
                 ui.add_space(10.0);
-                ui.label(RichText::new("Device changes apply to your next Join. Leave and rejoin to switch an active call. System default uses your operating system’s selected device.").size(12.0).color(theme::SECONDARY));
+                ui.label(RichText::new("Saved devices are used on your next call. Leave and rejoin to switch devices during a call.").size(12.0).color(theme::SECONDARY));
                 ui.add_space(12.0);
                 let mut ptt = state.ptt_enabled;
                 if ui.checkbox(&mut ptt, "Push-to-talk").changed() {
@@ -1419,7 +1419,7 @@ impl VoiceApp {
                 }
                 if ptt || !self.ptt.available() { ui.label(RichText::new(self.ptt.status()).size(12.0).color(theme::SECONDARY)); }
                 let mut volume = state.output_volume;
-                if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0).text("Output volume")).changed() {
+                if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0).text("Voice volume")).changed() {
                     self.send(Command::SetOutputVolume(volume));
                 }
                 let mut call_sounds = state.call_sounds;
@@ -1427,33 +1427,38 @@ impl VoiceApp {
                 let mut sound_volume = state.sound_volume;
                 if ui.add_enabled(call_sounds, egui::Slider::new(&mut sound_volume, 0.0..=1.0).text("Call sound volume")).changed() { self.send(Command::SetSoundVolume(sound_volume)); }
                 if let Some(error) = &self.sound_error { ui.label(RichText::new(error).size(12.0).color(theme::DANGER)); }
-                ui.label(format!("Build {}", option_env!("FASTDISTORD_BUILD_COMMIT").unwrap_or("development")));
                 ui.label(state.microphone_permission.label());
-                if !state.login_storage_status.is_empty() { ui.label(&state.login_storage_status); }
+                if storage_notice(&state.login_storage_status) { ui.label(&state.login_storage_status); }
                 if matches!(state.microphone_permission, crate::microphone::Permission::Denied | crate::microphone::Permission::Restricted) {
-                    ui.label("Open System Settings → Privacy & Security → Microphone, then Join again.");
+                    ui.label("Allow microphone access in System Settings → Privacy & Security → Microphone, then rejoin.");
                 }
-                ui.collapsing("Advanced & privacy", |ui| {
+                ui.collapsing("Privacy & diagnostics", |ui| {
                     ui.label("Use headphones. Echo cancellation is not available.");
                     let mut tracing = state.voice_handshake.enabled();
-                    if ui.checkbox(&mut tracing, "Record redacted voice handshake trace").changed() { state.voice_handshake.set_enabled(tracing); }
+                    if ui.checkbox(&mut tracing, "Keep a redacted connection trace").changed() { state.voice_handshake.set_enabled(tracing); }
                     ui.label(state.voice_handshake.summary());
                     if tracing {
-                        if ui.button("Copy handshake trace").clicked() { ui.ctx().copy_text(state.voice_handshake.trace()); }
-                        ui.label("Memory only: event names, versions, counts and timing. No keys, account IDs or payloads.");
+                        if ui.button("Copy connection trace").clicked() { ui.ctx().copy_text(state.voice_handshake.trace()); }
+                        ui.label("Stored in memory only. Includes connection events and timing, never keys, account IDs or message content.");
                     }
-                    ui.label("Losing focus releases an in-window press. Audio is not recorded or saved.");
+                    ui.label("The Hold to talk button releases when this window loses focus. Audio is not recorded.");
                     ui.label(if self.tray.as_ref().is_some_and(Tray::is_shown) {
-                        "Closing the window keeps calls running in the tray. Quit ends the call."
+                        "Calls continue in the tray when you close this window. Quit ends the call."
                     } else {
-                        "Closing the window disconnects and quits."
+                        "Closing this window ends the call and quits."
                     });
+                });
+                ui.add_space(12.0);
+                ui.collapsing("About", |ui| {
+                    ui.label(RichText::new("built with vibes by Mehmet Serhat Uzgoren").size(12.0).color(theme::SECONDARY));
+                    ui.label(RichText::new(format!("Build {}", option_env!("FASTDISTORD_BUILD_COMMIT").unwrap_or("development"))).size(12.0).color(theme::SECONDARY));
+                    ui.label("Unofficial Discord client. Personal-account access may break or lead to account restrictions.");
                 });
                 ui.add_space(15.0);
                 ui.separator();
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(state.account.is_some(), egui::Button::new(if cfg!(target_os = "macos") { "Log out & forget credential" } else { "Log out" })).clicked() {
+                    if ui.add_enabled(state.account.is_some(), egui::Button::new(if cfg!(target_os = "macos") { "Log out & forget login" } else { "Log out" })).clicked() {
                         self.release_ptt();
                         self.token.zeroize();
                         self.risk_accepted = false;

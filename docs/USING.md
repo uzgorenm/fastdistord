@@ -11,7 +11,7 @@ Remember me saves to macOS Keychain after a successful login. Quit preserves it;
 | Control | Behavior |
 |---|---|
 | Connect | Explicitly opts into the unofficial adapter and checks the entered account |
-| Friends / Servers | Switches the sidebar list; server channels appear inline |
+| Friends / Servers | Switches the sidebar list; servers start collapsed; click a server, then Chat or Voice to see its channels |
 | Friend | Opens a private conversation without calling |
 | Call | Starts the selected individual DM call; audio waits for DAVE and microphone permission. Ring requests and confirmed ringing are shown separately |
 | Join · channel | Joins that voice channel and opens audio only after DAVE readiness |
@@ -20,7 +20,7 @@ Remember me saves to macOS Keychain after a successful login. Quit preserves it;
 | Push to talk | While unmuted, hold Ctrl+Shift+Space or the visible Talk control |
 | Settings | Device selection, output volume and account controls |
 | Reconnect | Restarts failed signaling with the in-memory credential; explicitly rejoin voice afterward |
-| Disconnect | Ends voice and releases both audio devices |
+| Leave / Cancel | Ends voice and releases both audio devices |
 | Log out | Clears the account and removes a saved macOS Keychain credential |
 | Quit | Stops audio and exits; preserves a remembered login |
 
@@ -32,11 +32,11 @@ Choose a friend, or choose **Servers**, a server and its text channel. The app l
 
 Type plain text and press **Send**. Enter adds a line rather than sending. Messages are limited to 2000 characters. The app suppresses mentions, text-to-speech and link embeds. Attachments, threads, reactions and edits are not supported. Empty-content messages display a placeholder; they may contain unsupported attachments or system content.
 
-Sending disables server/channel changes until the response arrives. A failed send keeps the draft. If its outcome is uncertain, refresh history before retrying to avoid duplicates. Switching text channels or servers clears the unsent draft. Logout cancels pending text work and clears displayed history. Channel changes, successful sends and logout also erase the editor undo history, so Undo cannot restore a draft from an earlier scope.
+Sending disables server/channel changes until the response arrives. A failed send keeps the draft. If its outcome is uncertain, refresh history before retrying to avoid duplicates. Selecting a different text channel or server clears the unsent draft. Switching Friends/Servers or Chat/Voice only changes the sidebar and preserves the draft. Logout cancels pending text work and clears displayed history. Channel changes, successful sends and logout also erase the editor undo history, so Undo cannot restore a draft from an earlier scope.
 
 ## Call feedback
 
-The compact current-call panel stays above the profile controls while you browse. It shows the target, known participants and Connecting, Ring requested, Ringing, encryption pending, or Voice connected. Elapsed time appears only for encrypted voice with opened audio devices. Cancel/Leave ends the selected call.
+The bottom bar keeps your profile and call controls together while you browse. It shows the call target and connection or microphone status. Hover over the status for participant information and elapsed time. Cancel/Leave ends the call.
 
 Conversations render Discord’s actual call system messages once, including supplied participant/end metadata. The current-call panel shows live state separately; the app does not invent call history. Original local tones provide connecting, confirmed-ringing and join/leave feedback. Settings has Call sounds and a separate volume control; deafen silences them. Local sound is not proof of remote notification. Ring cancellation is one scoped best-effort request, without retries or a delivery guarantee.
 

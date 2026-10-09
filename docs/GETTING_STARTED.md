@@ -41,7 +41,7 @@ For an Apple Silicon app bundle, on a Mac:
 ```sh
 rustup target add aarch64-apple-darwin
 ./scripts/bundle-macos.sh
-open dist/Fastdistord.app
+open dist/latest/Fastdistord.app
 ```
 
 The script validates the microphone usage description and adds a local ad-hoc signature. It does not notarize, upload, or publish a release. Linux cannot validate Apple hardware, Keychain prompts, microphone permission, or produce a tested Mac app merely by cross-compiling.
@@ -50,10 +50,10 @@ The script validates the microphone usage description and adds a local ad-hoc si
 
 1. Read the unofficial-access risk disclosure. No official desktop/web client needs to be running for this adapter.
 2. Read the short account-access disclosure and choose **Connect with QR code**. Scan the code using Discord on your phone and approve the login there. Only approve a code you started yourself. An expired/canceled login needs a fresh Connect.
-3. Leave “Remember in macOS Keychain” unchecked for session-only access. Optional saving happens after successful account validation. **Connect from Keychain** reads a credential you previously chose to save in this app. Existing local session entry remains available under its disclosure; never extract another app’s credentials or put tokens in chat or commands.
+3. Leave **Remember me** unchecked for session-only access. Optional saving happens after successful account validation. **Connect from Keychain** reads a credential you previously chose to save in this app. Existing local session entry remains available under its disclosure; never extract another app’s credentials or put tokens in chat or commands.
 4. Choose **Servers**, select a server, then click **Join · channel**. Or choose a friend and click **Call** in the conversation. **This action authorizes opening your selected audio devices and joining that specific channel.** The OS may request microphone permission.
 5. Transmission starts muted. Use headphones; select your intended mode and unmute. Enabling PTT does not itself unmute. Deafen also blocks outgoing audio.
-6. Leave releases capture. Closing the window keeps an active call resident; use the tray to reopen or Quit to exit.
+6. Leave releases capture. Closing the window keeps a call running when the tray is available; otherwise it quits. Use the tray to reopen or Quit to exit.
 
 Server mute/deafen/suppression is respected. A server move, channel change or uncertain access stops audio rather than automatically undoing the change. Select/rejoin explicitly after checking access. Device changes apply at the next Join. Transient network/device failures use bounded recovery of the same authorized session and pinned devices; mute is preserved and PTT is reset. Invalid/ambiguous sessions, server revocation and exhausted retries require explicit reconnect/rejoin. See [Recovery boundaries](USING.md#recovery-boundaries).
 
