@@ -11,7 +11,7 @@ The work ran concurrently in five feature streams: audio, account/chat, shortcut
 platform notifications/updates, and UI. One integrator owned shared runtime,
 settings and transport interfaces. Each stream had exclusive source files.
 
-The full locked suite passed 198 tests (11 library, 175 application and 12
+The full locked suite passed 199 tests (11 library, 176 application and 12
 integration), with five deliberately ignored cases. Formatting, strict all-target
 Clippy and nine standalone DAVE policy/handshake tests passed. The UI worker also
 inspected four synthetic CPU renders in dark/light, normal/narrow and enlarged-text
@@ -21,7 +21,8 @@ separately beside the local preview artifact after construction.
 
 Consequential checks cover test-buffer bounds and disposal, DSP opt-in and reference
 fidelity, gain bounds and stable identities, stale held PTT after privacy revocation,
-incoming-call identity/cancellation/expiry, logout sound and notification ownership,
+incoming-call identity/cancellation/expiry, canceled microphone-permission ownership,
+logout sound and notification ownership,
 ACK ordering, message ownership, history deletion races, unknown counts, settings
 bounds, image visibility/eviction/retry, contrast and keyboard input. The first
 combined UI run exposed context-lock re-entry during font measurement; moving theme
@@ -57,7 +58,7 @@ request returned v0.02/v0.01 metadata, and the production bounded update checker
 returned Current for 0.02. It reads no browser or Discord credential and never
 installs code. Private or unavailable metadata still produces an honest fallback.
 Signing inspection found no valid Developer ID Application identities; see
-[Signing](SIGNING.md). No signing enrollment, credential inspection, release,
+[Signing](SIGNING.md). No signing enrollment, private credential reads, release,
 merge or GitHub Actions was performed for this preview.
 
 Physical microphone/playback, processing quality, two-way calls, native global

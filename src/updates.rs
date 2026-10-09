@@ -91,7 +91,7 @@ fn status_failure(status: u16) -> Option<UpdateState> {
     match status {
         200 => None,
         401 | 404 => Some(unavailable(
-            "Release access is unavailable without GitHub authentication. This repository is private; open releases in your signed-in browser.",
+            "GitHub did not expose these releases anonymously. Open releases in your browser to check access.",
         )),
         403 | 429 => Some(unavailable(
             "GitHub denied or rate-limited this check. Open releases in your signed-in browser.",

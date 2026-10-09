@@ -127,10 +127,14 @@ fn persist_preferences(state: &Shared, repaint: &Repaint) {
 fn stop_mic_test(
     test: &mut crate::mic_test::MicTestController,
     scope: &mut u64,
+    permission_task: &mut Option<tokio::task::JoinHandle<()>>,
     state: &Shared,
     repaint: &Repaint,
 ) {
     *scope = scope.wrapping_add(1);
+    if let Some(task) = permission_task.take() {
+        task.abort();
+    }
     test.stop();
     update(state, repaint, |s| s.mic_test = test.status());
 }
@@ -488,7 +492,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     if let Some(task) = mic_permission_task.take() {
                         task.abort();
                     }
-                    stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                    stop_mic_test(
+                        &mut mic_test,
+                        &mut mic_scope,
+                        &mut mic_permission_task,
+                        &state,
+                        &repaint,
+                    );
                     mic_running = false;
                 }
                 if matches!(
@@ -588,7 +598,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         {
                             continue;
                         }
-                        stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                        stop_mic_test(
+                            &mut mic_test,
+                            &mut mic_scope,
+                            &mut mic_permission_task,
+                            &state,
+                            &repaint,
+                        );
                         mic_running = false;
                         let scope = mic_scope;
                         let tx = results_tx.clone();
@@ -920,8 +936,24 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         match crate::credential::load() {
                             Ok(token) => {
                                 social_request.cancel();
+                                action_scope = action_scope.wrapping_add(1);
+                                action_journal = None;
+                                history_journal = None;
+                                if let Some(task) = action_task.take() {
+                                    task.abort();
+                                }
+                                update(&state, &repaint, |s| {
+                                    s.message_action_busy = false;
+                                    s.message_action_status.clear();
+                                });
                                 clear_notifications(&notifications, &state);
-                                stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                                stop_mic_test(
+                                    &mut mic_test,
+                                    &mut mic_scope,
+                                    &mut mic_permission_task,
+                                    &state,
+                                    &repaint,
+                                );
                                 mic_running = false;
                                 update(&state, &repaint, |s| {
                                     crate::calls::clear_incoming(s);
@@ -1990,13 +2022,29 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     resume,
                 }) => {
                     clear_notifications(&notifications, &state);
-                    stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                    stop_mic_test(
+                        &mut mic_test,
+                        &mut mic_scope,
+                        &mut mic_permission_task,
+                        &state,
+                        &repaint,
+                    );
                     mic_running = false;
                     update(&state, &repaint, |s| {
                         crate::calls::clear_incoming(s);
                         s.chat_activity.mark_gap();
                     });
                     if auth_rejected {
+                        action_scope = action_scope.wrapping_add(1);
+                        action_journal = None;
+                        history_journal = None;
+                        if let Some(task) = action_task.take() {
+                            task.abort();
+                        }
+                        update(&state, &repaint, |s| {
+                            s.message_action_busy = false;
+                            s.message_action_status.clear();
+                        });
                         social_request.cancel();
                         let removed = !remembered_session || crate::credential::sign_out().is_ok();
                         remembered_session = false;
@@ -2566,7 +2614,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
                 None => {
                     clear_notifications(&notifications, &state);
-                    stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                    stop_mic_test(
+                        &mut mic_test,
+                        &mut mic_scope,
+                        &mut mic_permission_task,
+                        &state,
+                        &repaint,
+                    );
                     mic_running = false;
                     update(&state, &repaint, |s| {
                         crate::calls::clear_incoming(s);
@@ -3055,6 +3109,25 @@ fn permission_event_affects_call(
 }
 #[cfg(test)]
 mod tests {
+    // A permission future canceled by signaling loss must not leave Start disabled
+    // forever or reopen a microphone after its initiating view has disappeared.
+    #[tokio::test]
+    async fn stopping_a_pending_mic_permission_retires_its_owner_and_generation() {
+        let state = Arc::new(Mutex::new(UiState::default()));
+        let mut test = crate::mic_test::MicTestController::default();
+        let mut scope = 5;
+        let mut permission = Some(tokio::spawn(std::future::pending::<()>()));
+        let handle = permission.as_ref().unwrap().abort_handle();
+        stop_mic_test(&mut test, &mut scope, &mut permission, &state, &None);
+        tokio::task::yield_now().await;
+        assert!(handle.is_finished());
+        assert!(permission.is_none());
+        assert_eq!(scope, 6);
+        assert_eq!(
+            snapshot(&state).mic_test.phase,
+            crate::mic_test::TestPhase::Idle
+        );
+    }
     #[test]
     fn account_reset_preserves_app_preferences_and_revokes_old_sound_lease() {
         use std::sync::atomic::Ordering;
