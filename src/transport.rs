@@ -503,6 +503,38 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                         break;
                     }
                 };
+                // RawAdapter supplies a container header, not a PCM decoder.
+                // Confirm the production codec registry can prepare this source
+                // before attaching/arming it. Otherwise Songbird drops an errored
+                // track asynchronously while the capture meter keeps moving.
+                let input = match timeout(
+                    Duration::from_secs(2),
+                    input.make_playable_async(
+                        driver.config().codec_registry,
+                        driver.config().format_registry,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(input)) => input,
+                    _ => {
+                        let _ = events.send(TransportEvent::Disconnected {
+                            message: "Microphone audio processing could not start; reconnect to try again".into(),
+                            retryable: false,
+                        });
+                        break;
+                    }
+                };
+                // Preparation yields; a mute, leave, or MLS transition may have
+                // revoked this source's authority in the meantime.
+                if gate.session() != expected_session
+                    || !alive.load(Ordering::Acquire)
+                    || !dave_ready.load(Ordering::Acquire)
+                    || gate.epoch() != epoch
+                    || !gate.transmit_allowed()
+                {
+                    continue;
+                }
                 let track = driver.play_only_input(input);
                 let arm = armed.clone();
                 // This action runs on the mixer, after the old track has been replaced.

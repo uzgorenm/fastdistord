@@ -1233,6 +1233,62 @@ mod tests {
     }
 
     #[test]
+    fn microphone_reader_decodes_with_production_codecs_and_encodes_opus() {
+        use songbird::input::{AudioStream, LiveInput, RawAdapter, codecs};
+        use symphonia_core::audio::{AudioBufferRef, Signal};
+
+        let (mut producer, reader, gate) = reader_fixture();
+        let samples: Vec<f32> = (0..960)
+            .map(|i| (i as f32 * std::f32::consts::TAU * 440.0 / 48_000.0).sin() * 0.25)
+            .collect();
+        for &sample in &samples {
+            producer
+                .push(CaptureSample {
+                    sample,
+                    epoch: gate.epoch(),
+                })
+                .unwrap();
+        }
+        // Use the runtime registry, not a test-only decoder or enabled test feature.
+        let mut input = LiveInput::Raw(AudioStream {
+            input: Box::new(RawAdapter::new(reader, 48_000, 1)),
+        })
+        .promote(codecs::get_codec_registry(), codecs::get_probe())
+        .expect("production microphone PCM decoder is missing");
+        let parsed = input.parsed_mut().unwrap();
+        let packet = parsed.format.next_packet().unwrap();
+        let AudioBufferRef::F32(decoded) = parsed.decoder.decode(&packet).unwrap() else {
+            panic!("microphone stream must decode as f32 PCM");
+        };
+        assert_eq!(decoded.spec().rate, 48_000);
+        assert_eq!(decoded.spec().channels.count(), 1);
+        assert_eq!(decoded.chan(0), samples);
+        let mut encoder = songbird::driver::opus::Encoder::new(
+            48_000,
+            songbird::driver::opus::Channels::Mono,
+            songbird::driver::opus::Application::Audio,
+        )
+        .unwrap();
+        let mut opus = [0_u8; 1276];
+        let len = encoder.encode_float(decoded.chan(0), &mut opus).unwrap();
+        assert!(
+            len > 3,
+            "synthetic speech must produce a non-silence Opus packet"
+        );
+        let mut decoder =
+            songbird::driver::opus::Decoder::new(48_000, songbird::driver::opus::Channels::Mono)
+                .unwrap();
+        let mut received = [0_f32; 960];
+        assert_eq!(
+            decoder
+                .decode_float(&opus[..len], &mut received, false)
+                .unwrap(),
+            960
+        );
+        assert!(received.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
     fn discord_mute_confirmation_cycle_revokes_queued_pcm_and_held_ptt() {
         let (mut producer, mut reader, gate) = reader_fixture();
         producer

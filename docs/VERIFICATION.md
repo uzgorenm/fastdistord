@@ -1,3 +1,44 @@
+# Outgoing microphone PCM decoder, 2026-10-09
+
+The user reports that build `15a199e` connects and shows a moving microphone
+meter, but the other participant cannot hear them. The meter checks the current
+mute/deafen, server suppression, confirmed remote mute, PTT and encryption gates.
+It measures the gated input callback before the resampling worker, microphone
+reader, Songbird decoder, Opus encoder and encrypted packet send. Its movement
+does not establish that a playable microphone track exists.
+
+The normal dependency graph did not contain a PCM decoder. Songbird disables
+Symphonia's default features; the application depended only on `symphonia-core`.
+`RawAdapter` supplies a header for 48 kHz mono little-endian f32 samples, and
+Songbird's `RawReader` selects `CODEC_TYPE_PCM_F32LE`. The production codec
+registry could not instantiate that codec. `LiveInput::promote` returned
+`DecodeError("no compatible track found")`; Songbird then removed the errored
+track while capture and the meter continued. Track-handle disposal does not
+poison the driver, and no additional clone/drop cause was found on this path.
+
+The application now explicitly enables the PCM feature of the existing
+Symphonia 0.5.5 dependency. The lockfile adds only `symphonia-codec-pcm` 0.5.5.
+Microphone source preparation is awaited with a bounded timeout before track
+attachment and arming. Preparation errors produce a static, non-retryable
+disconnect message and close audio. After preparation yields, the monitor
+rechecks session ownership, liveness, DAVE readiness, capture epoch and transmit
+authority. Muting, PTT, membership transitions, speaking signaling, Opus/DAVE
+and transport encryption policies remain unchanged.
+
+The focused regression feeds synthetic samples into the actual `InputReader`
+and `RawAdapter`, using the production registry. It failed with the missing-codec
+error before the feature change. It now verifies the decoded samples, 48 kHz
+mono format, real non-silent Opus encoding, and a nonzero decoded round trip.
+No hardware, audio recording, credentials or network call is used by this test.
+
+Formatting, strict all-target Clippy and 131 offline tests passed; four
+hardware/network tests remain ignored. Existing mute/PTT, rate conversion,
+driver lifetime, DAVE authentication/membership and stale-packet regressions
+passed in that run. The dependency notice inventory was regenerated with the
+PCM codec included. The final bundle's commit and signature are checked after
+the local commit. Audible delivery through a live Discord call remains a user
+test; this result proves the local codec defect and its repair, not peer receipt.
+
 # Voice driver ownership and chat grouping, 2026-10-09
 
 The immediate `VoiceLoopStopped` after `ExternalSender` has a concrete local
