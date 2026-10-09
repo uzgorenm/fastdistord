@@ -2,7 +2,9 @@
 
 [Back to README](../README.md) · [Setup](GETTING_STARTED.md) · [Verification](VERIFICATION.md)
 
-Use `open dist/latest/Fastdistord.app` after a local bundle build. Settings shows the source commit so you can identify the running build.
+Use `open dist/latest/Fastdistord.app` after a local bundle build. Settings → About shows the source commit so you can identify the running build.
+
+Settings separates Voice & Audio, Notifications, Shortcuts, Appearance, Account and About into tabs. Each category scrolls independently when needed. Clicking either a friend’s avatar or name selects the same conversation.
 
 Remember me saves to macOS Keychain after a successful login. Quit preserves it; startup restores it without joining voice. Existing saved entries can migrate when no preference exists. An explicit session-only login or Logout prevents startup restore. Storage errors appear in the app; approve its macOS Keychain prompt when needed. The ad-hoc signature can cause another prompt after an update. No password is stored in the preference file.
 
@@ -48,7 +50,7 @@ The microphone icon reflects the actual transmission gate. An unmute request can
 
 ## Audio test and processing
 
-In Settings, choose an input and select **Start microphone test**. The app confirms the actual selected device, captures at most five seconds in memory, then waits for **Play**. Playback consumes the clip. **Stop**, closing Settings, hiding the window, changing devices or processing, starting a call, logout and quit dispose of the test. An unused clip expires after one minute. Test samples never enter the call transport or a file.
+In Settings → Voice & Audio, choose an input and select **Record test**. The app confirms the actual selected device, captures at most five seconds in memory, then waits for **Play test**. Playback consumes the clip. **Stop & erase**, leaving the Voice & Audio tab, closing Settings, hiding the window, changing devices or processing, starting a call, logout and quit dispose of the test. An unused clip expires after one minute. Test samples never enter the call transport or a file.
 
 Noise suppression uses the native Rust [nnnoiseless](https://github.com/jneem/nnnoiseless) RNNoise implementation. Automatic gain is a separate conservative level adjustment. Both are optional and off by default. Echo cancellation is unavailable: the app does not have the synchronized speaker reference and delay handling it requires. Use headphones. Participant sliders attenuate received audio from that stable user ID from zero to normal volume; at most 128 custom values are stored.
 
