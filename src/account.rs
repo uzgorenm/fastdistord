@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 pub struct PersonalAccount {
     token: Zeroizing<String>,
     http: reqwest::Client,
+    user_id: u64,
 }
 #[derive(Debug)]
 pub struct AuthenticationRejected;
@@ -44,13 +45,18 @@ impl PersonalAccount {
             .retry(reqwest::retry::never())
             .user_agent(format!("fastdistord/{}", fastdistord::RELEASE_VERSION))
             .build()?;
-        let client = Self { token, http };
+        let mut client = Self {
+            token,
+            http,
+            user_id: 0,
+        };
         let user = client.get("/users/@me").await?;
         let account = Account {
             avatar: crate::profiles::hash(&user["avatar"]),
             id: snowflake(&user["id"]).context("Account response had no valid user ID")?,
             name: display_name(&user),
         };
+        client.user_id = account.id;
         let values = client.get("/users/@me/guilds").await?;
         let guilds = values
             .as_array()
@@ -176,13 +182,26 @@ impl PersonalAccount {
         let value = self.get(&format!("/guilds/{guild_id}/channels")).await?;
         messaging::parse_channels(&value, guild_id)
     }
-    /// A bounded snapshot, oldest first. No background polling or pagination.
+    /// A bounded latest snapshot, oldest first. No background polling.
     pub async fn messages(&self, channel_id: u64) -> Result<Vec<ChatMessage>> {
+        Ok(self.message_page(channel_id, None).await?.messages)
+    }
+    /// One explicit history page. The caller caps the merged history at MAX_HISTORY.
+    pub async fn message_page(
+        &self,
+        channel_id: u64,
+        before: Option<u64>,
+    ) -> Result<messaging::HistoryPage> {
         messaging::validate_id(channel_id)?;
-        let value = self
-            .get(&format!("/channels/{channel_id}/messages?limit=50"))
-            .await?;
-        messaging::parse_messages(&value, channel_id)
+        let mut path = format!(
+            "/channels/{channel_id}/messages?limit={}",
+            messaging::MAX_HISTORY_PAGE
+        );
+        if let Some(id) = before {
+            messaging::validate_id(id)?;
+            path.push_str(&format!("&before={id}"));
+        }
+        messaging::parse_page(&self.get(&path).await?, channel_id, before)
     }
     /// Only invoke from an explicit send action. No retries, attachments or mentions.
     pub async fn send_message(&self, channel_id: u64, content: &str) -> Result<ChatMessage> {
@@ -198,6 +217,93 @@ impl PersonalAccount {
         messaging::parse_message(&value, channel_id).map_err(|_| {
             anyhow::anyhow!("Discord returned an invalid send response. The message may have been sent; check history before retrying.")
         })
+    }
+    pub async fn reply_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        content: &str,
+    ) -> Result<ChatMessage> {
+        let body = messaging::reply_payload(channel_id, message_id, content)?;
+        let value = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/channels/{channel_id}/messages"),
+                Some(body),
+            )
+            .await?;
+        let reply = messaging::parse_message(&value, channel_id).map_err(|_| {
+            anyhow::anyhow!(
+                "Discord returned an invalid reply response. Check history before retrying."
+            )
+        })?;
+        if reply.author_id != self.user_id
+            || reply.reference.as_ref().is_none_or(|reference| {
+                reference.channel_id != channel_id || reference.message_id != message_id
+            })
+        {
+            bail!(
+                "Discord returned a different reply than requested. Check history before retrying."
+            );
+        }
+        Ok(reply)
+    }
+    pub async fn edit_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        content: &str,
+    ) -> Result<ChatMessage> {
+        messaging::validate_id(channel_id)?;
+        messaging::validate_id(message_id)?;
+        // Reject invalid content locally before issuing even the ownership GET.
+        messaging::send_payload(content)?;
+        let path = format!("/channels/{channel_id}/messages/{message_id}");
+        let original = messaging::parse_message(&self.get(&path).await?, channel_id)?;
+        if original.id != message_id {
+            bail!("Discord returned a different message than requested.");
+        }
+        let body = messaging::edit_payload(&original, self.user_id, content)?;
+        let value = self
+            .request(reqwest::Method::PATCH, &path, Some(body))
+            .await?;
+        let edited = messaging::parse_message(&value, channel_id).map_err(|_| {
+            anyhow::anyhow!(
+                "Discord returned an invalid edit response. Check history before retrying."
+            )
+        })?;
+        if edited.id != message_id || edited.author_id != self.user_id {
+            bail!("Discord returned a different edited message. Check history before retrying.");
+        }
+        Ok(edited)
+    }
+    /// Add our normal reaction. A successful 204 is expected; await gateway state
+    /// rather than incrementing optimistically and then counting the event twice.
+    pub async fn react_message(&self, channel_id: u64, message_id: u64, emoji: &str) -> Result<()> {
+        messaging::validate_id(channel_id)?;
+        messaging::validate_id(message_id)?;
+        let emoji = messaging::reaction_segment(emoji)?;
+        self.request(
+            reqwest::Method::PUT,
+            &format!("/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me"),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+    /// Explicit user read-marker action only. The unofficial manual ACK route
+    /// does not require retaining an acknowledgement token or guessing mention counts.
+    /// Source: dolfies/discord.py-self discord/http.py::ack_message.
+    pub async fn acknowledge_message(&self, channel_id: u64, message_id: u64) -> Result<()> {
+        messaging::validate_id(channel_id)?;
+        messaging::validate_id(message_id)?;
+        self.request(
+            reqwest::Method::POST,
+            &format!("/channels/{channel_id}/messages/{message_id}/ack"),
+            Some(json!({"manual":true})),
+        )
+        .await?;
+        Ok(())
     }
     pub async fn channels(&self, guild_id: u64) -> Result<Vec<Channel>> {
         let v = self.get(&format!("/guilds/{guild_id}/channels")).await?;
@@ -484,6 +590,12 @@ async fn gateway_loop(
                                     }
                                     events.send(GatewayEvent::Ready { resumed: false }).await?;
                                     events
+                                        .send(GatewayEvent::Dispatch {
+                                            kind: "READ_STATE_SNAPSHOT".into(),
+                                            data: crate::chat_activity::ready_snapshot(&v["d"]),
+                                        })
+                                        .await?;
+                                    events
                                         .send(GatewayEvent::SelfPresence(
                                             crate::profiles::self_presence(&v["d"]["sessions"]),
                                         ))
@@ -533,6 +645,12 @@ async fn gateway_loop(
                                         | "MESSAGE_CREATE"
                                         | "MESSAGE_UPDATE"
                                         | "MESSAGE_DELETE"
+                                        | "MESSAGE_DELETE_BULK"
+                                        | "MESSAGE_ACK"
+                                        | "MESSAGE_REACTION_ADD"
+                                        | "MESSAGE_REACTION_REMOVE"
+                                        | "MESSAGE_REACTION_REMOVE_ALL"
+                                        | "MESSAGE_REACTION_REMOVE_EMOJI"
                                 ) {
                                     events
                                         .send(GatewayEvent::Dispatch {

@@ -47,6 +47,20 @@ pub enum Phase {
 }
 #[derive(Clone, Debug)]
 pub struct UiState {
+    pub preferences: crate::preferences::Preferences,
+    pub preferences_status: String,
+    pub mic_test: crate::mic_test::TestStatus,
+    pub incoming_sequence: u64,
+    pub dismissed_incoming: Option<(u64, Option<u64>)>,
+    pub incoming_call: Option<crate::calls::IncomingCall>,
+    pub notification_status: String,
+    pub chat_activity: crate::chat_activity::ActivityState,
+    pub history_has_more: bool,
+    pub history_loading: bool,
+    pub message_action_busy: bool,
+    pub message_action_status: String,
+    pub update_state: crate::updates::UpdateState,
+    pub sound_authority: Arc<std::sync::atomic::AtomicU64>,
     pub account: Option<Account>,
     pub profiles: std::collections::HashMap<u64, crate::profiles::Profile>,
     pub guilds: Vec<Guild>,
@@ -97,6 +111,20 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            preferences: Default::default(),
+            preferences_status: String::new(),
+            mic_test: Default::default(),
+            incoming_sequence: 0,
+            dismissed_incoming: None,
+            incoming_call: None,
+            notification_status: "Desktop notifications are off".into(),
+            chat_activity: Default::default(),
+            history_has_more: false,
+            history_loading: false,
+            message_action_busy: false,
+            message_action_status: String::new(),
+            update_state: Default::default(),
+            sound_authority: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             account: None,
             profiles: Default::default(),
             guilds: vec![],
@@ -148,6 +176,48 @@ impl Default for UiState {
 }
 // Deliberately no Debug: Connect contains an ephemeral secret.
 pub enum Command {
+    StartMicTest,
+    StopMicTest,
+    PlayMicTest,
+    SetProcessing(crate::audio_processing::ProcessingOptions),
+    SetParticipantVolume {
+        user_id: u64,
+        volume: f32,
+    },
+    AnswerIncoming {
+        channel: u64,
+        generation: u64,
+    },
+    DeclineIncoming {
+        channel: u64,
+        generation: u64,
+    },
+    RequestNotificationPermission,
+    SetDesktopNotifications(bool),
+    LoadOlderMessages,
+    ReplyMessage {
+        channel_id: u64,
+        message_id: u64,
+        content: String,
+    },
+    EditMessage {
+        channel_id: u64,
+        message_id: u64,
+        content: String,
+    },
+    ReactMessage {
+        channel_id: u64,
+        message_id: u64,
+        emoji: String,
+    },
+    MarkChannelRead {
+        channel_id: u64,
+        message_id: u64,
+    },
+    CheckForUpdates,
+    SetUpdateChecks(bool),
+    SetAppearance(crate::preferences::Appearance),
+    SetShortcuts(crate::shortcuts::ShortcutConfig),
     Connect {
         token: String,
         risk_accepted: bool,

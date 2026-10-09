@@ -33,6 +33,156 @@ pub enum Cue {
     Joined,
     Left,
 }
+/// One actual Gateway ring, scoped to the authenticated account and known DM.
+#[derive(Clone, Debug)]
+pub struct IncomingCall {
+    pub channel: u64,
+    pub caller_name: String,
+    pub received_at: Instant,
+    pub generation: u64,
+    pub message_id: Option<u64>,
+}
+const INCOMING_TIMEOUT: Duration = Duration::from_secs(45);
+pub fn incoming_matches(state: &UiState, channel: u64, generation: u64) -> bool {
+    state.account.is_some()
+        && state.incoming_call.as_ref().is_some_and(|call| {
+            call.channel == channel
+                && call.generation == generation
+                && call.received_at.elapsed() < INCOMING_TIMEOUT
+        })
+}
+pub fn clear_incoming(state: &mut UiState) -> Option<u64> {
+    let call = state.incoming_call.take()?;
+    state.dismissed_incoming = Some((call.channel, call.message_id));
+    cue(state, Cue::Stop);
+    Some(call.generation)
+}
+pub fn observe_incoming(state: &mut UiState, kind: &str, data: &serde_json::Value) {
+    let Some(channel) = data.get("channel_id").and_then(crate::account::snowflake) else {
+        return;
+    };
+    if kind == "CALL_DELETE" {
+        if state
+            .incoming_call
+            .as_ref()
+            .is_some_and(|call| call.channel == channel)
+        {
+            clear_incoming(state);
+        }
+        if state
+            .dismissed_incoming
+            .is_some_and(|(id, _)| id == channel)
+        {
+            state.dismissed_incoming = None;
+        }
+        return;
+    }
+    if !matches!(kind, "CALL_CREATE" | "CALL_UPDATE") {
+        return;
+    }
+    let Some(own) = state.account.as_ref().map(|account| account.id) else {
+        return;
+    };
+    let Some(ringing) = data
+        .get("ringing")
+        .and_then(serde_json::Value::as_array)
+        .filter(|v| v.len() <= 25)
+    else {
+        return;
+    };
+    if !ringing
+        .iter()
+        .any(|value| crate::account::snowflake(value) == Some(own))
+    {
+        if state
+            .incoming_call
+            .as_ref()
+            .is_some_and(|call| call.channel == channel)
+        {
+            clear_incoming(state);
+        }
+        if state
+            .dismissed_incoming
+            .is_some_and(|(id, _)| id == channel)
+        {
+            state.dismissed_incoming = None;
+        }
+        return;
+    }
+    // Partial updates for another ring cannot churn the currently shown prompt.
+    if kind == "CALL_UPDATE"
+        && state
+            .incoming_call
+            .as_ref()
+            .is_some_and(|call| call.channel != channel)
+    {
+        return;
+    }
+    let message_id = data.get("message_id").and_then(crate::account::snowflake);
+    if let Some((dismissed_channel, dismissed_message)) = state.dismissed_incoming
+        && dismissed_channel == channel
+    {
+        if kind == "CALL_CREATE" && message_id.is_some() && message_id != dismissed_message {
+            state.dismissed_incoming = None;
+        } else {
+            return;
+        }
+    }
+    if state
+        .current_call
+        .as_ref()
+        .is_some_and(|call| call.channel == channel)
+        || state.incoming_call.as_ref().is_some_and(|call| {
+            call.channel == channel
+                && (kind != "CALL_CREATE" || message_id.is_none() || message_id == call.message_id)
+        })
+    {
+        return;
+    }
+    let Some(dm) = state
+        .direct_channels
+        .iter()
+        .find(|dm| dm.id == channel && dm.recipients.len() == 1)
+    else {
+        return;
+    };
+    let name = dm.name.clone();
+    state.incoming_sequence = state.incoming_sequence.wrapping_add(1);
+    state.incoming_call = Some(IncomingCall {
+        channel,
+        caller_name: name,
+        received_at: Instant::now(),
+        generation: state.incoming_sequence,
+        message_id,
+    });
+    cue(state, Cue::Ring);
+}
+pub fn expire_incoming(state: &mut UiState, now: Instant) {
+    if state
+        .incoming_call
+        .as_ref()
+        .is_some_and(|call| now.saturating_duration_since(call.received_at) >= INCOMING_TIMEOUT)
+    {
+        clear_incoming(state);
+    }
+}
+pub fn sync_sound_authority(state: &UiState) {
+    let enabled = state.call_sounds
+        && !state.deafened
+        && !state.server_deafened
+        && state.confirmed_deafened != Some(true)
+        && state.account.is_some()
+        && state.sound_volume.is_finite()
+        && state.sound_volume > 0.0;
+    state.sound_authority.store(
+        if enabled {
+            state.sound_sequence
+        } else {
+            u64::MAX
+        },
+        std::sync::atomic::Ordering::Release,
+    );
+}
 #[derive(Clone, Debug)]
 pub struct Call {
     pub channel: u64,
@@ -47,6 +197,7 @@ pub struct Call {
     pub elapsed: Duration,
 }
 pub fn start(state: &mut UiState, channel: u64, private: bool, target: String) {
+    clear_incoming(state);
     end(state, "Call canceled");
     state.current_call = Some(Call {
         channel,
@@ -95,6 +246,7 @@ pub fn end(state: &mut UiState, _reason: &'static str) {
 pub fn cue(state: &mut UiState, cue: Cue) {
     state.sound_sequence = state.sound_sequence.wrapping_add(1);
     state.sound_cue = cue;
+    sync_sound_authority(state);
 }
 pub fn refresh(state: &mut UiState) {
     let Some(call) = &mut state.current_call else {
@@ -202,6 +354,69 @@ mod tests {
             muted: true,
             deafened: false,
         }
+    }
+    // A delayed/partial call update must neither manufacture a ring nor revive
+    // a dismissed one; the audio lease must revoke without a UI frame.
+    #[test]
+    fn incoming_ring_is_scoped_cancellable_and_expires_without_rendering() {
+        use serde_json::json;
+        use std::sync::atomic::Ordering;
+        let mut s = state();
+        s.direct_channels.push(crate::social::DirectChannel {
+            id: 10,
+            name: "Friend".into(),
+            last_message_id: None,
+            recipients: vec![crate::social::Friend {
+                id: 2,
+                name: "Friend".into(),
+                avatar: None,
+            }],
+        });
+        observe_incoming(
+            &mut s,
+            "CALL_CREATE",
+            &json!({"channel_id":"11","ringing":["1"]}),
+        );
+        assert!(s.incoming_call.is_none());
+        observe_incoming(
+            &mut s,
+            "CALL_CREATE",
+            &json!({"channel_id":"10","ringing":["2"]}),
+        );
+        assert!(s.incoming_call.is_none());
+        let ring = json!({"channel_id":"10","message_id":"100","ringing":["1"]});
+        observe_incoming(&mut s, "CALL_CREATE", &ring);
+        let generation = s.incoming_call.as_ref().unwrap().generation;
+        assert!(incoming_matches(&s, 10, generation));
+        assert!(!incoming_matches(&s, 10, generation + 1));
+        let lease = s.sound_authority.clone();
+        let playing = lease.load(Ordering::Acquire);
+        observe_incoming(&mut s, "CALL_UPDATE", &json!({"channel_id":"10"}));
+        assert_eq!(s.incoming_call.as_ref().unwrap().generation, generation);
+        assert_eq!(clear_incoming(&mut s), Some(generation));
+        assert_ne!(lease.load(Ordering::Acquire), playing);
+        observe_incoming(&mut s, "CALL_UPDATE", &ring);
+        assert!(s.incoming_call.is_none());
+        observe_incoming(&mut s, "CALL_CREATE", &ring);
+        assert!(s.incoming_call.is_none());
+        observe_incoming(
+            &mut s,
+            "CALL_CREATE",
+            &json!({"channel_id":"10","message_id":"101","ringing":["1"]}),
+        );
+        assert!(s.incoming_call.as_ref().unwrap().generation > generation);
+        assert!(!incoming_matches(&s, 10, generation));
+        let deadline = s.incoming_call.as_ref().unwrap().received_at + INCOMING_TIMEOUT;
+        expire_incoming(&mut s, deadline);
+        assert!(s.incoming_call.is_none());
+        assert_eq!(s.sound_cue, Cue::Stop);
+        observe_incoming(&mut s, "CALL_DELETE", &json!({"channel_id":"10"}));
+        assert!(s.dismissed_incoming.is_none());
+        observe_incoming(&mut s, "CALL_CREATE", &ring);
+        let playing = lease.load(Ordering::Acquire);
+        s.deafened = true;
+        sync_sound_authority(&s);
+        assert_ne!(lease.load(Ordering::Acquire), playing);
     }
     #[test]
     fn observed_call_panel_scopes_ring_answer_pending_active_and_end() {

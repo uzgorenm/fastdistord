@@ -2,8 +2,8 @@
 //!
 //! CPAL callbacks never allocate, block, log, or acquire a mutex. Bounded SPSC
 //! queues separate them from a dedicated DSP worker and Songbird's decoder.
-//! Rubato provides band-limited rate conversion; no echo cancellation or noise
-//! suppression is claimed. Use headphones to avoid acoustic feedback.
+//! Rubato provides band-limited rate conversion. Optional noise suppression and
+//! digital gain run on the worker. Echo cancellation is unavailable.
 
 use std::{
     collections::VecDeque,
@@ -26,10 +26,14 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use symphonia_core::io::MediaSource;
+use zeroize::Zeroize;
+
+use crate::audio_processing::{ProcessingOptions, Processor};
 
 pub const VOICE_SAMPLE_RATE: u32 = 48_000;
 const BLOCK_FRAMES: usize = 480; // 10 ms of Discord PCM.
 const MAX_USERS: usize = 32;
+const MAX_USER_VOLUMES: usize = 128;
 const USER_QUEUE_FRAMES: usize = 4_800; // 100 ms per speaker.
 const CAPTURE_QUEUE_FRAMES: usize = 4_800;
 const MAX_PACKET_FRAMES: usize = 5_760; // Opus's maximum 120 ms packet.
@@ -201,6 +205,33 @@ impl TxGate {
         });
     }
 
+    /// Publish a shortcut edge only if no privacy gate changed since the
+    /// shortcut owner observed it. Never retry against a newer epoch: a held
+    /// key must not reopen capture after encryption or remote-mute revocation.
+    pub fn set_ptt_pressed_at_epoch(
+        &self,
+        pressed: Option<bool>,
+        expected_epoch: u64,
+    ) -> Option<u64> {
+        let flags = expected_epoch & FLAGS_MASK;
+        let next_flags = match pressed {
+            Some(true) => flags | PTT_DOWN | PTT_KNOWN,
+            Some(false) => (flags | PTT_KNOWN) & !PTT_DOWN,
+            None => flags & !(PTT_DOWN | PTT_KNOWN),
+        };
+        let next = if flags == next_flags {
+            expected_epoch
+        } else {
+            (expected_epoch.wrapping_add(1 << 8) & TX_GENERATION_MASK)
+                | (expected_epoch & RX_GENERATION_MASK)
+                | next_flags
+        };
+        self.state
+            .compare_exchange(expected_epoch, next, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| next)
+    }
+
     pub fn fail_closed(&self) {
         self.change(|flags| (flags | MUTED | SUPPRESSED) & !(PTT_DOWN | PTT_KNOWN));
     }
@@ -360,6 +391,7 @@ struct Shared {
     failed: AtomicBool,
     meter: AtomicU32,
     volume: AtomicU32,
+    processing: AtomicU32,
     capture_overruns: AtomicU64,
     playback_overruns: AtomicU64,
     playback_underruns: AtomicU64,
@@ -373,6 +405,7 @@ impl Shared {
             failed: AtomicBool::new(false),
             meter: AtomicU32::new(0),
             volume: AtomicU32::new(safe_volume(volume).to_bits()),
+            processing: AtomicU32::new(0),
             capture_overruns: AtomicU64::new(0),
             playback_overruns: AtomicU64::new(0),
             playback_underruns: AtomicU64::new(0),
@@ -426,15 +459,15 @@ fn drain<T: Copy>(consumer: &mut Consumer<T>) {
 }
 
 /// Rubato's buffers and kernels are allocated before any CPAL stream is played.
-struct RateConverter {
+pub(crate) struct RateConverter {
     inner: Option<SincFixedIn<f32>>,
-    input: Vec<Vec<f32>>,
-    output: Vec<Vec<f32>>,
-    chunk: usize,
+    pub(crate) input: Vec<Vec<f32>>,
+    pub(crate) output: Vec<Vec<f32>>,
+    pub(crate) chunk: usize,
 }
 
 impl RateConverter {
-    fn new(from: u32, to: u32, channels: usize, chunk: usize) -> Result<Self> {
+    pub(crate) fn new(from: u32, to: u32, channels: usize, chunk: usize) -> Result<Self> {
         if from == to {
             return Ok(Self {
                 inner: None,
@@ -467,7 +500,7 @@ impl RateConverter {
         })
     }
 
-    fn process(&mut self) -> Result<usize> {
+    pub(crate) fn process(&mut self) -> Result<usize> {
         if let Some(inner) = &mut self.inner {
             let (_, written) = inner.process_into_buffer(&self.input, &mut self.output, None)?;
             Ok(written)
@@ -494,6 +527,19 @@ impl RateConverter {
     }
 }
 
+impl Drop for RateConverter {
+    fn drop(&mut self) {
+        // Owned scratch audio is scrubbed. Rubato's private delay history is
+        // disposed by its own Drop and has no public zeroization interface.
+        for channel in &mut self.input {
+            channel.zeroize();
+        }
+        for channel in &mut self.output {
+            channel.zeroize();
+        }
+    }
+}
+
 struct UserBuffer {
     id: Option<u64>,
     samples: VecDeque<Stereo>,
@@ -502,6 +548,7 @@ struct UserBuffer {
 
 struct Mixer {
     users: Vec<UserBuffer>,
+    volumes: Vec<(u64, f32)>,
     epoch: u64,
 }
 
@@ -516,6 +563,26 @@ impl Mixer {
                 })
                 .collect(),
             epoch,
+            volumes: Vec::with_capacity(MAX_USER_VOLUMES),
+        }
+    }
+    fn set_participant_volume(&mut self, user_id: u64, volume: f32) {
+        if user_id == 0 {
+            return;
+        }
+        let volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if let Some(index) = self.volumes.iter().position(|(id, _)| *id == user_id) {
+            if volume == 1.0 {
+                self.volumes.swap_remove(index);
+            } else {
+                self.volumes[index].1 = volume;
+            }
+        } else if volume != 1.0 && self.volumes.len() < MAX_USER_VOLUMES {
+            self.volumes.push((user_id, volume));
         }
     }
     fn clear_for_epoch(&mut self, epoch: u64) {
@@ -563,13 +630,18 @@ impl Mixer {
             channel[..frames].fill(0.0);
         }
         for user in &mut self.users {
+            let volume = self
+                .volumes
+                .iter()
+                .find(|(id, _)| Some(*id) == user.id)
+                .map_or(1.0, |(_, v)| *v);
             let (left, right) = output.split_at_mut(1);
             for (left, right) in left[0].iter_mut().zip(&mut right[0]).take(frames) {
                 let Some(sample) = user.samples.pop_front() else {
                     break;
                 };
-                *left += sample.left;
-                *right += sample.right;
+                *left += sample.left * volume;
+                *right += sample.right * volume;
             }
         }
         // Saturate once after summing, avoiding order-dependent clipping.
@@ -590,6 +662,15 @@ pub struct PlaybackSink {
 }
 
 impl PlaybackSink {
+    /// Stable Discord user ID, independent of SSRC and mixer slot reuse. Applied
+    /// before summation on the DSP worker; hardware callbacks never take this lock.
+    pub fn set_participant_volume(&self, user_id: u64, volume: f32) {
+        if let Ok(mut mixer) = self.mixer.lock() {
+            mixer.set_participant_volume(user_id, volume);
+        } else {
+            self.shared.fail();
+        }
+    }
     /// Returns accepted *frames*. Excess, invalid formats and new users beyond
     /// the fixed 32-speaker budget are dropped rather than growing memory.
     pub fn push_pcm(&self, user_id: u64, samples: &[i16], channels: usize) -> usize {
@@ -879,6 +960,14 @@ impl AudioEngine {
     pub fn set_output_volume(&self, volume: f32) {
         self.playback.set_volume(volume);
     }
+    pub fn set_participant_volume(&self, user_id: u64, volume: f32) {
+        self.playback.set_participant_volume(user_id, volume);
+    }
+    pub fn set_processing(&self, options: ProcessingOptions) {
+        self.shared
+            .processing
+            .store(options.bits(), Ordering::Release);
+    }
     pub fn stats(&self) -> AudioStats {
         AudioStats {
             capture_overruns: self.shared.capture_overruns.load(Ordering::Relaxed),
@@ -928,12 +1017,17 @@ fn run_worker(
     let mut capture_epoch = shared.gate.epoch();
     let mut receive_epoch = shared.gate.snapshot().receive_epoch();
     let mut filled = 0;
+    let mut processor = Processor::new(ProcessingOptions::from_bits(
+        shared.processing.load(Ordering::Acquire),
+    ));
     let output_capacity = output.buffer().capacity();
     let target_output = (output_rate as usize / 50).max(1); // 20 ms prepared output.
     while !shared.stopped.load(Ordering::Acquire) {
         let snapshot = shared.gate.snapshot();
-        if capture_epoch != snapshot.0 {
+        let processing = ProcessingOptions::from_bits(shared.processing.load(Ordering::Acquire));
+        if capture_epoch != snapshot.0 || processor.options() != processing {
             capture_converter.reset();
+            processor.reset(processing);
             filled = 0;
             capture_epoch = snapshot.0;
         }
@@ -954,17 +1048,17 @@ fn run_worker(
                 if filled == capture_converter.chunk {
                     let count = capture_converter.process()?;
                     if shared.gate.epoch() == capture_epoch {
-                        for sample in &capture_converter.output[0][..count] {
+                        processor.process(&capture_converter.output[0][..count], |sample| {
                             if transmit
                                 .push(CaptureSample {
-                                    sample: finite_sample(*sample),
+                                    sample,
                                     epoch: capture_epoch,
                                 })
                                 .is_err()
                             {
                                 shared.capture_overruns.fetch_add(1, Ordering::Relaxed);
                             }
-                        }
+                        });
                     }
                     filled = 0;
                 }
@@ -1476,6 +1570,26 @@ mod tests {
         assert_ne!(epoch, gate.snapshot().receive_epoch());
     }
     #[test]
+    fn stale_ptt_edge_cannot_reopen_after_encryption_gate_revokes_held_state() {
+        let gate = open_gate();
+        gate.set_ptt_enabled(true);
+        let epoch = gate.epoch();
+        let held = gate.set_ptt_pressed_at_epoch(Some(true), epoch).unwrap();
+        assert!(gate.transmit_allowed());
+        gate.set_encryption_pending(true);
+        gate.set_encryption_pending(false);
+        assert_eq!(gate.set_ptt_pressed_at_epoch(Some(true), held), None);
+        assert!(!gate.transmit_allowed());
+        let released = gate
+            .set_ptt_pressed_at_epoch(Some(false), gate.epoch())
+            .unwrap();
+        assert!(
+            gate.set_ptt_pressed_at_epoch(Some(true), released)
+                .is_some()
+        );
+        assert!(gate.transmit_allowed());
+    }
+    #[test]
     fn arbitrary_byte_reads_and_shutdown() {
         let (mut producer, mut reader, gate) = reader_fixture();
         producer
@@ -1510,6 +1624,51 @@ mod tests {
         mixer.mix_into(&mut output, 3);
         assert_eq!(output[0], [1.0, 1.0, 0.0]);
         assert_eq!(output[1], [0.0, -0.5, 0.0]);
+    }
+    #[test]
+    fn participant_attenuation_follows_user_id_and_applies_to_queued_audio() {
+        let mut mixer = Mixer::new(0);
+        mixer.push(10, &[16_384, -16_384], 2);
+        mixer.push(20, &[16_384, 16_384], 2);
+        mixer.set_participant_volume(10, 0.0);
+        mixer.set_participant_volume(20, 0.5);
+        let mut out = vec![vec![0.0; 1]; 2];
+        mixer.mix_into(&mut out, 1);
+        assert_eq!(out, [vec![0.25], vec![0.25]]);
+        // Reuse the first mixer slot for another speaker: old attenuation must
+        // not follow the slot/SSRC. A later packet for user10 is still muted.
+        mixer.users[0].id = None;
+        mixer.push(30, &[16_384], 1);
+        mixer.push(10, &[16_384], 1);
+        mixer.mix_into(&mut out, 1);
+        assert_eq!(out, [vec![0.5], vec![0.5]]);
+        mixer.set_participant_volume(10, 8.0);
+        mixer.push(10, &[16_384], 1);
+        mixer.mix_into(&mut out, 1);
+        assert_eq!(out[0][0], 0.5, "participant volume must never amplify");
+        mixer.set_participant_volume(10, f32::NAN);
+        mixer.push(10, &[16_384], 1);
+        mixer.mix_into(&mut out, 1);
+        assert_eq!(out[0][0], 0.0);
+    }
+    #[test]
+    fn participant_volume_controls_remain_bounded_and_deafen_still_clears_queues() {
+        let mut mixer = Mixer::new(0);
+        for id in 1..=1_000 {
+            mixer.set_participant_volume(id, 0.5);
+        }
+        assert_eq!(mixer.volumes.len(), MAX_USER_VOLUMES);
+        mixer.push(1, &[16_384], 1);
+        mixer.clear_for_epoch(1);
+        let mut out = vec![vec![0.0; 1]; 2];
+        mixer.mix_into(&mut out, 1);
+        assert_eq!(out[0][0], 0.0);
+        mixer.push(1, &[16_384], 1);
+        mixer.mix_into(&mut out, 1);
+        assert_eq!(
+            out[0][0], 0.25,
+            "deafen must preserve the user's chosen attenuation"
+        );
     }
     #[test]
     fn mixer_is_bounded_per_user_and_globally() {

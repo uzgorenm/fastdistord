@@ -2,18 +2,25 @@
 
 mod account;
 mod audio;
+mod audio_processing;
 mod calls;
+mod chat_activity;
 mod credential;
 mod messaging;
+mod mic_test;
 mod microphone;
 mod model;
+mod notifications;
+mod preferences;
 mod profiles;
 mod qr_login;
 mod recovery;
 mod runtime;
+mod shortcuts;
 mod social;
 mod transport;
 mod ui;
+mod updates;
 fn main() -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!("fastdistord {}", fastdistord::RELEASE_VERSION);
@@ -35,7 +42,12 @@ fn main() -> anyhow::Result<()> {
         println!("{}", credential::storage_status());
         return Ok(());
     }
-    let state = std::sync::Arc::new(std::sync::Mutex::new(model::UiState::default()));
+    let (preferences, preferences_status) = preferences::load();
+    let state = std::sync::Arc::new(std::sync::Mutex::new(model::UiState {
+        preferences,
+        preferences_status,
+        ..Default::default()
+    }));
     let gate = std::sync::Arc::new(audio::TxGate::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = runtime::spawn(state.clone(), rx, gate.clone());
