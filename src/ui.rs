@@ -82,7 +82,7 @@ pub fn run(
         .map_err(|err| anyhow::anyhow!("Could not run the native window: {err}"))
 }
 
-const AVATAR_NAME_GAP: f32 = 4.0;
+const AVATAR_NAME_GAP: f32 = 8.0;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ServerSection {
