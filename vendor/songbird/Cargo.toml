@@ -162,6 +162,8 @@ receive = ["dep:bytes", "dep:dashmap", "discortp?/demux", "discortp?/rtcp"]
 # Used for docgen/testing/benchmarking.
 full-doc = ["default", "tungstenite", "twilight", "builtin-queue", "receive"]
 internals = ["dep:byteorder"]
+# Socket-free receive harness; unlike internals, this preserves production scheduling.
+receive-test = ["receive"]
 
 [lib]
 bench = false

@@ -76,6 +76,8 @@ codegen-units = 1
 strip = "debuginfo"
 
 [dev-dependencies]
+# Expose the production receive path to offline encrypted-packet regressions.
+songbird = { path = "vendor/songbird", default-features = false, features = ["receive-test"] }
 openmls = "=0.8.2"
 openmls_rust_crypto = "=0.5.1"
 openmls_basic_credential = "=0.5.0"

@@ -1,6 +1,10 @@
 mod decode_sizes;
 mod playout_buffer;
+#[cfg(feature = "receive-test")]
+mod receive_harness;
 mod ssrc_state;
+#[cfg(feature = "receive-test")]
+pub use receive_harness::ReceiveHarness;
 
 use self::{decode_sizes::*, playout_buffer::*, ssrc_state::*};
 
@@ -43,14 +47,13 @@ struct UdpRx {
     config: Config,
     rx: Receiver<UdpRxMessage>,
     ssrc_signalling: Arc<SsrcTracker>,
-    udp_socket: UdpSocket,
     dave_session: Arc<RwLock<Option<davey::DaveSession>>>,
     dave_protocol_version: Arc<AtomicU16>,
 }
 
 impl UdpRx {
-    #[instrument(skip(self))]
-    async fn run(&mut self, interconnect: &mut Interconnect) {
+    #[instrument(skip(self, udp_socket))]
+    async fn run(&mut self, interconnect: &mut Interconnect, udp_socket: UdpSocket) {
         let mut cleanup_time = Instant::now();
         let mut playout_time = Instant::now() + TIMESTEP_LENGTH;
         let mut byte_dest: Option<BytesMut> = None;
@@ -61,7 +64,7 @@ impl UdpRx {
             }
 
             select! {
-                Ok((len, _addr)) = self.udp_socket.recv_from(byte_dest.as_mut().unwrap()) => {
+                Ok((len, _addr)) = udp_socket.recv_from(byte_dest.as_mut().unwrap()) => {
                     let mut pkt = byte_dest.take().unwrap();
                     pkt.truncate(len);
 
@@ -168,23 +171,31 @@ impl UdpRx {
                 }
 
                 let mut packet_data = if self.config.decode_mode.should_decrypt() {
-                    let out = self.cipher.decrypt_rtp_in_place(&mut rtp).map(|(s, t)| {
-                        if rtp.get_padding() != 0 {
+                    match self.cipher.decrypt_rtp_in_place(&mut rtp) {
+                        Ok((s, mut t)) => {
                             let payload = rtp.payload();
-                            let payload_length = payload.len();
-                            let padding_count = payload[payload_length - t - 1] as usize;
-
-                            (s, t + padding_count, true)
-                        } else {
-                            (s, t, true)
+                            let Some(end) = payload.len().checked_sub(t) else {
+                                return;
+                            };
+                            if rtp.get_padding() != 0 {
+                                let Some(body) = payload.get(s..end) else {
+                                    return;
+                                };
+                                let Some(&padding) = body.last() else {
+                                    return;
+                                };
+                                if padding == 0 || usize::from(padding) > body.len() {
+                                    return;
+                                }
+                                t += usize::from(padding);
+                            }
+                            Some((s, t, true))
                         }
-                    });
-
-                    if let Err(ref e) = out {
-                        warn!("RTP decryption failed: {:?}", e);
+                        Err(e) => {
+                            warn!("RTP decryption failed: {:?}", e);
+                            return;
+                        }
                     }
-
-                    out.ok()
                 } else {
                     None
                 };
@@ -193,7 +204,12 @@ impl UdpRx {
                     let ssrc = rtp.get_ssrc();
                     let payload = rtp.payload_mut();
                     let payload_length = payload.len();
-                    let body = &mut payload[rtp_body_start..payload_length - rtp_body_tail];
+                    let Some(body_end) = payload_length.checked_sub(rtp_body_tail) else {
+                        return;
+                    };
+                    let Some(body) = payload.get_mut(rtp_body_start..body_end) else {
+                        return;
+                    };
                     let body_length = body.len();
                     // fastdistord: never pass plaintext Opus through an E2EE-only receiver.
                     if !crate::driver::dave_policy::allow_receive(
@@ -272,7 +288,7 @@ impl UdpRx {
                 let entry = self
                     .decoder_map
                     .entry(rtp.get_ssrc())
-                    .or_insert_with(|| SsrcState::new(&rtp, crypto_mode, &self.config));
+                    .or_insert_with(|| SsrcState::new(&rtp, &self.config));
 
                 // Only do this on RTP, rather than RTCP -- this pins decoder state liveness
                 // to *speech* rather than just presence.
@@ -280,6 +296,8 @@ impl UdpRx {
 
                 let store_pkt = StoredPacket {
                     packet: packet.freeze(),
+                    payload_offset: rtp_body_start,
+                    payload_end_pad: rtp_body_tail,
                     decrypted,
                 };
                 let packet = store_pkt.packet.clone();
@@ -352,12 +370,11 @@ pub(crate) async fn runner(
         config,
         rx,
         ssrc_signalling,
-        udp_socket,
         dave_session,
         dave_protocol_version,
     };
 
-    state.run(&mut interconnect).await;
+    state.run(&mut interconnect, udp_socket).await;
 
     trace!("UDP receive handle stopped.");
 }

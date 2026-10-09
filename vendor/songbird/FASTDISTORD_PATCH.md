@@ -47,6 +47,24 @@ it does not implement or replace any encryption, MLS, codec, or packet format.
 
 ## Verification and limits
 
+The receive jitter buffer retains each packet's authenticated media offset and
+trailing-byte count. Transport decryption excludes RTP extensions and padding;
+DAVE decryption shortens the payload in place. Reconstructing bounds later from
+the transport mode included leftover DAVE ciphertext in the Opus decoder input.
+Playout now uses the saved bounds and reports the same bounds in `RtpData`.
+Failed transport authentication and invalid padding/bounds are dropped before
+buffering. Required DAVE authentication and readiness checks are unchanged.
+
+The development-only `receive-test` feature exposes a socket-free harness for
+the production packet processor and playout decoder. The UDP socket is owned by
+the receive runner future, while the packet-processing state needs no socket.
+This feature does not enable upstream's benchmark scheduling changes and is not
+enabled by the normal release dependency. Offline MLS tests verify exact Opus
+and PCM recovery under both AEAD modes, with/without RTP extensions and padding,
+and reject replay, tampering, plaintext, unknown senders, unready encryption and
+malformed packets. These fixtures do not verify physical speaker output or a
+live Discord peer.
+
 Application ownership must account for this upstream `Driver` behavior:
 dropping any clone sends `CoreMessage::Poison` and shuts down its workers.
 Fastdistord transfers the original driver out of its pending setup guard on

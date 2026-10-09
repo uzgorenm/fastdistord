@@ -787,3 +787,196 @@ fn optional_json_envelope_fields_do_not_drop_membership_or_heartbeat() {
     }
     assert!(!trace.trace().contains("synthetic-private-data"));
 }
+
+// Synthetic peer packets exercise the real UDP packet processor without a socket,
+// device, credential or captured audio. The clear RTP extension preamble is AAD;
+// extension contents, DAVE frame and RTP padding are transport-encrypted.
+fn encrypted_voice_rtp(
+    mode: songbird::driver::CryptoMode,
+    body: &[u8],
+    extension: bool,
+    padding: &[u8],
+) -> Vec<u8> {
+    use aes_gcm::{AeadInPlace, KeyInit};
+    use songbird::driver::CryptoMode;
+
+    let mut header = vec![
+        0x80 | (u8::from(extension) << 4) | (u8::from(!padding.is_empty()) << 5),
+        120,
+    ];
+    header.extend_from_slice(&1_u16.to_be_bytes());
+    header.extend_from_slice(&960_u32.to_be_bytes());
+    header.extend_from_slice(&77_u32.to_be_bytes());
+    let mut ciphertext = vec![];
+    if extension {
+        header.extend_from_slice(&[0xbe, 0xde, 0, 1]);
+        ciphertext.extend_from_slice(&[0x10, 0x7f, 0, 0]);
+    }
+    ciphertext.extend_from_slice(body);
+    ciphertext.extend_from_slice(padding);
+    let tag = match mode {
+        CryptoMode::Aes256Gcm => {
+            let mut nonce = aes_gcm::Nonce::default();
+            nonce[..4].copy_from_slice(&1_u32.to_be_bytes());
+            aes_gcm::Aes256Gcm::new_from_slice(&[7; 32])
+                .unwrap()
+                .encrypt_in_place_detached(&nonce, &header, &mut ciphertext)
+                .unwrap()
+                .to_vec()
+        }
+        CryptoMode::XChaCha20Poly1305 => {
+            let mut nonce = chacha20poly1305::XNonce::default();
+            nonce[..4].copy_from_slice(&1_u32.to_be_bytes());
+            chacha20poly1305::XChaCha20Poly1305::new_from_slice(&[7; 32])
+                .unwrap()
+                .encrypt_in_place_detached(&nonce, &header, &mut ciphertext)
+                .unwrap()
+                .to_vec()
+        }
+        _ => panic!("unsupported fixture mode"),
+    };
+    header.extend(ciphertext);
+    header.extend(tag);
+    header.extend_from_slice(&1_u32.to_be_bytes());
+    header
+}
+
+#[tokio::test]
+async fn received_dave_opus_survives_transport_and_playout_without_trailing_ciphertext() {
+    use songbird::{
+        Config,
+        driver::{
+            Channels, CryptoMode, DecodeConfig, DecodeMode, ReceiveHarness, SampleRate, opus,
+        },
+        packet::Packet,
+    };
+    use std::{num::NonZeroU8, sync::atomic::Ordering};
+
+    let samples: Vec<i16> = (0..960)
+        .map(|i| (12_000.0 * (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin()) as i16)
+        .collect();
+    let mut encoder =
+        opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio).unwrap();
+    let mut encoded = vec![0; 1276];
+    let len = encoder.encode(&samples, &mut encoded).unwrap();
+    encoded.truncate(len);
+    let mut reference = opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap();
+    let mut expected = vec![0; 1920];
+    assert_eq!(
+        reference.decode(&encoded, &mut expected, false).unwrap(),
+        960
+    );
+    assert!(expected.iter().any(|s| s.unsigned_abs() > 1000));
+
+    for mode in [CryptoMode::Aes256Gcm, CryptoMode::XChaCha20Poly1305] {
+        for (extension, padding) in [(false, 0), (true, 0), (false, 8), (true, 8)] {
+            let mut group = OfflineGroup::new();
+            let dave = group.alice.encrypt_opus(&encoded).unwrap();
+            let mut rtp_padding = vec![0; usize::from(padding)];
+            if let Some(last) = rtp_padding.last_mut() {
+                *last = padding;
+            }
+            let packet = encrypted_voice_rtp(mode, &dave, extension, &rtp_padding);
+            let mut config = Config::default()
+                .decode_mode(DecodeMode::Decode(DecodeConfig::new(
+                    Channels::Stereo,
+                    SampleRate::Hz48000,
+                )))
+                .playout_buffer_length(NonZeroU8::new(1).unwrap());
+            config.require_dave = true;
+            config.dave_ready.store(true, Ordering::Release);
+            let mut receiver = ReceiveHarness::new(mode, &[7; 32], config, group.bob);
+            receiver.map_ssrc(77, 101);
+            receiver.receive(&packet).await;
+            let voice = receiver
+                .voice_tick(77)
+                .expect("authenticated Opus must decode")
+                .expect("received peer must reach the playout buffer");
+            let pcm = voice.decoded_voice.expect("decode mode must return PCM");
+            assert_eq!(pcm.len(), expected.len());
+            assert!(
+                pcm == expected,
+                "buffered decode differs from exact Opus: {mode:?}, extension={extension}, padding={padding}"
+            );
+            let metadata = voice.packet.unwrap();
+            let rtp = metadata.rtp();
+            let body = rtp.payload();
+            assert_eq!(metadata.payload_offset, if extension { 8 } else { 0 });
+            assert_eq!(
+                metadata.payload_end_pad,
+                20 + usize::from(padding) + dave.len() - encoded.len()
+            );
+            assert_eq!(
+                &body[metadata.payload_offset..body.len() - metadata.payload_end_pad],
+                encoded
+            );
+            receiver.receive(&packet).await;
+            assert!(
+                receiver.voice_tick(77).unwrap().is_none(),
+                "DAVE replay reached playout"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn receive_pipeline_rejects_unauthenticated_unready_and_malformed_media() {
+    use songbird::{
+        Config,
+        driver::{CryptoMode, DecodeMode, ReceiveHarness},
+    };
+    use std::{num::NonZeroU8, sync::atomic::Ordering};
+
+    for mode in [CryptoMode::Aes256Gcm, CryptoMode::XChaCha20Poly1305] {
+        for case in [
+            "transport",
+            "dave",
+            "plaintext",
+            "unready",
+            "unknown_ssrc",
+            "wrong_user",
+            "padding_zero",
+            "padding_oversized",
+            "truncated",
+        ] {
+            let mut group = OfflineGroup::new();
+            let mut body = group
+                .alice
+                .encrypt_opus(&[0xf8, 0xff, 0xfe])
+                .unwrap()
+                .into_owned();
+            match case {
+                "dave" => body[0] ^= 0x40,
+                "plaintext" => body = vec![0xf8, 0xff, 0xfe],
+                _ => {}
+            }
+            let padding: &[u8] = match case {
+                "padding_zero" => &[0],
+                "padding_oversized" => &[255],
+                _ => &[],
+            };
+            let mut packet = encrypted_voice_rtp(mode, &body, false, padding);
+            match case {
+                "transport" => packet[12] ^= 0x40,
+                "truncated" => packet.truncate(13),
+                _ => {}
+            }
+            let mut config = Config::default()
+                .decode_mode(DecodeMode::Decode(Default::default()))
+                .playout_buffer_length(NonZeroU8::new(1).unwrap());
+            config.require_dave = true;
+            config
+                .dave_ready
+                .store(case != "unready", Ordering::Release);
+            let mut receiver = ReceiveHarness::new(mode, &[7; 32], config, group.bob);
+            if case != "unknown_ssrc" {
+                receiver.map_ssrc(77, if case == "wrong_user" { 999 } else { 101 });
+            }
+            receiver.receive(&packet).await;
+            assert!(
+                receiver.voice_tick(77).unwrap().is_none(),
+                "rejected {case} packet reached playout under {mode:?}"
+            );
+        }
+    }
+}

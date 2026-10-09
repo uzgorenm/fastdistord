@@ -1,3 +1,56 @@
+# Received DAVE payload bounds, 2026-10-09
+
+The user confirmed that the other participant could hear them on build
+`d22b480`, but they could not hear the peer. This confirms outgoing audibility
+for that call only. The peer's speaking-indicator state is unknown.
+
+The production receive path lost the exact Opus bounds at its jitter-buffer
+handoff. `UdpRx::process_udp_message` authenticates transport encryption, strips
+RTP extensions/padding, then DAVE-decrypts the media in place. DAVE decryption
+correctly increases the trailing-byte count as the frame shrinks. `StoredPacket`
+previously retained only the packet and a decrypted flag. `SsrcState` then
+recomputed the range using only the transport suffix length, so leftover DAVE
+frame bytes reached libopus. It also reported an end index in `RtpData`'s
+trailing-byte-count field. The receive decoder uses libopus directly and is
+independent of the outgoing Symphonia PCM codec.
+
+The buffer now retains the authenticated media offset and trailing-byte count;
+playout decodes exactly that slice and exposes matching `RtpData` bounds. Failed
+transport authentication and invalid RTP padding/bounds are rejected before
+buffering. Outgoing audio, required encryption, membership transitions and the
+application's mute/deafen/PTT gates are unchanged.
+
+A socket-free harness calls the actual production UDP packet processor and
+playout decoder. The focused regression uses a real two-member offline MLS group,
+synthetic Opus, transport AEAD and the production jitter buffer. Before the fix,
+it failed with `buffered decode differs from exact Opus: Aes256Gcm,
+extension=false, padding=0`. Afterward all eight combinations of AES-GCM or
+XChaCha20-Poly1305, RTP extension presence and RTP padding return exact Opus bytes
+and PCM identical to a fresh reference libopus decoder. Replay, transport/DAVE
+tampering, plaintext, unknown/wrong senders, unready encryption, invalid padding
+and truncation are rejected. No keys, packets or audio are logged; test samples
+are generated locally. The development-only harness feature preserves production
+scheduling and is absent from the normal release dependency.
+
+All 136 offline tests passed against the combined voice/UI tree; four
+hardware/network tests remain ignored.
+Formatting, strict all-target Clippy and the six standalone DAVE policy plus
+three handshake tests passed.
+The full run includes speaker mixing, output gating/volume/downmix, resampling,
+synthetic duplex processing, microphone codec and driver lifetime regressions.
+These checks reproduce and repair a receive corruption defect; they do not
+establish that this was the only cause of the user's silent call or verify
+physical playback. The final bundle's source identity and signature are checked
+after the local commit and recorded beside `dist/latest/Fastdistord.app`.
+
+The combined UI removes the top branding/success banner, retains storage failure
+messages, compacts the call footer, and places a bounded multiline composer and
+Send button on one row. Servers opens with its groups collapsed; each expanded
+server has Chat/Voice filters that preserve the conversation, call and draft.
+Existing message grouping remains intact. Aggregate tests include navigation,
+filter and draft preservation, pending-send protection, and storage-error
+visibility. No native app launch or live call was automated for verification.
+
 # Outgoing microphone PCM decoder, 2026-10-09
 
 The user reports that build `15a199e` connects and shows a moving microphone
