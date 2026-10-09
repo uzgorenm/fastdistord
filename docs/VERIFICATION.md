@@ -1,3 +1,70 @@
+# Selected improvements, 2026-10-09
+
+This source preview adds a five-second local microphone test, optional RNNoise
+suppression and conservative automatic gain, per-participant receive attenuation,
+actual incoming-call prompts, optional macOS notifications, configurable
+local/global shortcuts, unread state and message actions, bounded history/image
+loading, appearance preferences and anonymous update checks. It does not change
+required DAVE encryption, introduce AEC or publish a new version.
+
+The work ran concurrently in five feature streams: audio, account/chat, shortcuts,
+platform notifications/updates, and UI. One integrator owned shared runtime,
+settings and transport interfaces. Each stream had exclusive source files.
+
+The full locked suite passed 198 tests (11 library, 175 application and 12
+integration), with five deliberately ignored cases. Formatting, strict all-target
+Clippy and nine standalone DAVE policy/handshake tests passed. The UI worker also
+inspected four synthetic CPU renders in dark/light, normal/narrow and enlarged-text
+states. No native app, microphone, Discord call, account message, credential or OS
+permission prompt was exercised. Release-build/package evidence is recorded
+separately beside the local preview artifact after construction.
+
+Consequential checks cover test-buffer bounds and disposal, DSP opt-in and reference
+fidelity, gain bounds and stable identities, stale held PTT after privacy revocation,
+incoming-call identity/cancellation/expiry, logout sound and notification ownership,
+ACK ordering, message ownership, history deletion races, unknown counts, settings
+bounds, image visibility/eviction/retry, contrast and keyboard input. The first
+combined UI run exposed context-lock re-entry during font measurement; moving theme
+reads outside the font closure fixed all four failing input regressions without
+relaxing their assertions.
+
+Incoming commands include both channel and call generation. Local ringtone callbacks
+hold an atomic lease that cancellation or deafen can revoke without a rendered
+frame. Notification generations survive logout, and delayed submission cannot
+resurrect a dismissed ring. HTTP message results are reconciled against at most
+256 normalized Gateway mutations and a 512 KiB budget per pending operation;
+overflow requests a refresh instead of presenting a stale result. Read badges use
+actual Gateway acknowledgements, not assumed success from the HTTP request.
+
+On this Apple Silicon host, processing ten seconds of synthetic 48 kHz mono audio
+in an optimized standalone benchmark took approximately 0.52 ms with processing
+disabled, 3.62 ms with automatic gain, and 111.60 ms with RNNoise plus gain. These
+figures exclude initialization, devices and resampling and were measured during
+other development builds. They do not measure live-call CPU, latency or perceived
+speech quality. History retains at most 200 messages, each page at most 50. Image
+caches retain at most 128 entries and request only visible images; failed requests
+wait 60 seconds before a visible retry. Live idle/call memory and CPU remain
+unmeasured.
+
+RNNoise uses [nnnoiseless 0.5.2](https://github.com/jneem/nnnoiseless), with command-line
+and file support disabled. The native [WebRTC audio-processing wrapper](https://github.com/tonarino/webrtc-audio-processing)
+was evaluated; real AEC also needs synchronized reverse audio and delay handling
+that this pipeline does not provide. Owned test samples are scrubbed on disposal;
+upstream DSP private state has no secure-zeroization guarantee.
+
+The GitHub repository was verified public during final integration. An anonymous
+request returned v0.02/v0.01 metadata, and the production bounded update checker
+returned Current for 0.02. It reads no browser or Discord credential and never
+installs code. Private or unavailable metadata still produces an honest fallback.
+Signing inspection found no valid Developer ID Application identities; see
+[Signing](SIGNING.md). No signing enrollment, credential inspection, release,
+merge or GitHub Actions was performed for this preview.
+
+Physical microphone/playback, processing quality, two-way calls, native global
+shortcut registration, macOS notification delivery, personal-account message
+operations and self-decline remain user-tested behavior. Windows and Linux native
+behavior is not established by these macOS checks.
+
 # Capture read-ahead and social navigation, 2026-10-09
 
 A continuous synthetic microphone fixture exposed a read-ahead defect in the

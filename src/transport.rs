@@ -95,6 +95,7 @@ pub struct Transport {
     driver: Driver,
     audio: Arc<OnceLock<Arc<AudioEngine>>>,
     audio_config: Arc<Mutex<AudioConfig>>,
+    audio_preferences: Arc<Mutex<crate::preferences::Preferences>>,
     gate: Arc<TxGate>,
     alive: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
@@ -204,6 +205,7 @@ impl Transport {
             driver,
             audio: audio_health,
             audio_config: Arc::new(Mutex::new(config)),
+            audio_preferences: Arc::new(Mutex::new(Default::default())),
             gate,
             alive,
             monitor: None,
@@ -214,6 +216,7 @@ impl Transport {
                 expected_session,
                 audio: transport.audio.clone(),
                 audio_config: transport.audio_config.clone(),
+                audio_preferences: transport.audio_preferences.clone(),
                 playback,
                 handshake,
                 gate: transport.gate.clone(),
@@ -250,6 +253,23 @@ impl Transport {
         }
     }
 
+    pub fn set_audio_preferences(&self, preferences: &crate::preferences::Preferences) {
+        // Serializes changes with delayed device initialization during DAVE setup.
+        if let Ok(mut saved) = self.audio_preferences.lock() {
+            if let Some(audio) = self.audio.get() {
+                audio.set_processing(preferences.processing);
+                for id in saved.participant_volumes.keys() {
+                    if !preferences.participant_volumes.contains_key(id) {
+                        audio.set_participant_volume(*id, 1.0);
+                    }
+                }
+                for (id, gain) in &preferences.participant_volumes {
+                    audio.set_participant_volume(*id, *gain);
+                }
+            }
+            *saved = preferences.clone();
+        }
+    }
     pub fn device_config(&self) -> AudioConfig {
         self.audio
             .get()
@@ -343,6 +363,7 @@ struct MonitorState {
     expected_session: u64,
     audio: Arc<OnceLock<Arc<AudioEngine>>>,
     audio_config: Arc<Mutex<AudioConfig>>,
+    audio_preferences: Arc<Mutex<crate::preferences::Preferences>>,
     playback: Arc<OnceLock<PlaybackSink>>,
     handshake: Arc<songbird::DaveHandshake>,
     gate: Arc<TxGate>,
@@ -369,6 +390,7 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
         expected_session,
         audio,
         audio_config,
+        audio_preferences,
         playback,
         handshake,
         gate,
@@ -454,8 +476,19 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                     engine.stop();
                     break;
                 }
-                let _ = playback.set(engine.playback());
-                let _ = audio.set(engine);
+                // Publish the engine under the same control lock used by settings.
+                // A change during permission/device opening cannot be lost.
+                if let Ok(preferences) = audio_preferences.lock() {
+                    engine.set_processing(preferences.processing);
+                    for (id, gain) in &preferences.participant_volumes {
+                        engine.set_participant_volume(*id, *gain);
+                    }
+                    let _ = playback.set(engine.playback());
+                    let _ = audio.set(engine);
+                } else {
+                    engine.stop();
+                    break;
+                }
             }
             let Some(audio) = audio.get() else {
                 break;

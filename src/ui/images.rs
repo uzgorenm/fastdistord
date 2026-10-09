@@ -1,8 +1,8 @@
 //! Small memory-only static Discord CDN cache. Fetch and decode happen off the UI thread.
 use egui::{ColorImage, TextureHandle};
 use std::{
-    collections::{HashMap, HashSet},
-    sync::mpsc,
+    collections::{HashSet, VecDeque},
+    time::{Duration, Instant},
 };
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Key {
@@ -24,16 +24,52 @@ impl Key {
         ))
     }
 }
+// The small fixed capacity keeps linear lookups cheap and texture memory bounded.
+struct Lru<T> {
+    entries: VecDeque<(Key, T)>,
+}
+impl<T> Default for Lru<T> {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+}
+impl<T: Clone> Lru<T> {
+    fn get(&mut self, key: &Key) -> Option<T> {
+        let index = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(index)?;
+        let value = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(value)
+    }
+    fn remove(&mut self, key: &Key) {
+        if let Some(i) = self.entries.iter().position(|(k, _)| k == key) {
+            self.entries.remove(i);
+        }
+    }
+    fn insert(&mut self, key: Key, value: T) {
+        self.remove(&key);
+        self.entries.push_back((key, value));
+        if self.entries.len() > 128 {
+            self.entries.pop_front();
+        }
+    }
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
 #[derive(Default)]
 pub struct Cache {
     account: Option<u64>,
     suspended: bool,
     tx: Option<tokio::sync::mpsc::Sender<Key>>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
-    rx: Option<mpsc::Receiver<(Key, Option<ColorImage>)>>,
+    rx: Option<tokio::sync::mpsc::Receiver<(Key, Option<ColorImage>)>>,
     pending: HashSet<Key>,
-    textures: HashMap<Key, TextureHandle>,
-    attempted: HashSet<Key>,
+    textures: Lru<TextureHandle>,
+    failed: Lru<Instant>,
 }
 impl Drop for Cache {
     fn drop(&mut self) {
@@ -66,7 +102,7 @@ impl Cache {
             self.account = account;
             if account.is_some() {
                 let (tx, mut jobs) = tokio::sync::mpsc::channel::<Key>(32);
-                let (out, rx) = mpsc::channel();
+                let (out, rx) = tokio::sync::mpsc::channel(32);
                 let (stop, mut stopped) = tokio::sync::oneshot::channel();
                 self.tx = Some(tx);
                 self.stop = Some(stop);
@@ -98,7 +134,11 @@ impl Cache {
                                         _ = &mut stopped => break,
                                         result = fetch(&client, &key) => result,
                                     };
-                                    if out.send((key, result)).is_err() { break }
+                                    tokio::select! {
+                                        biased;
+                                        _ = &mut stopped => break,
+                                        sent = out.send((key, result)) => { if sent.is_err() { break } }
+                                    }
                                     ctx.request_repaint();
                                 }
                             }
@@ -107,31 +147,43 @@ impl Cache {
                 });
             }
         }
-        if let Some(rx) = &self.rx {
-            for (key, pixels) in rx.try_iter() {
+        if let Some(rx) = &mut self.rx {
+            while let Ok((key, pixels)) = rx.try_recv() {
                 self.pending.remove(&key);
-                if let Some(pixels) = pixels
-                    && self.textures.len() < 128
-                {
+                if let Some(pixels) = pixels {
+                    self.failed.remove(&key);
                     self.textures.insert(
                         key,
                         ctx.load_texture("Discord portrait", pixels, egui::TextureOptions::LINEAR),
                     );
+                } else {
+                    self.failed
+                        .insert(key, Instant::now() + Duration::from_secs(60));
                 }
             }
         }
     }
-    pub fn get(&mut self, key: Key) -> Option<TextureHandle> {
-        if let Some(texture) = self.textures.get(&key) {
-            return Some(texture.clone());
+    pub fn get(&mut self, key: Key, visible: bool) -> Option<TextureHandle> {
+        if !visible {
+            return None;
         }
-        // A bounded one-shot attempt set also prevents broken portraits retrying on every repaint.
-        if self.attempted.len() < 128
-            && !self.attempted.contains(&key)
+        if let Some(texture) = self.textures.get(&key) {
+            return Some(texture);
+        }
+        if self
+            .failed
+            .get(&key)
+            .is_some_and(|until| until > Instant::now())
+        {
+            return None;
+        }
+        self.failed.remove(&key);
+        if key.url().is_some()
+            && self.pending.len() < 64
+            && !self.pending.contains(&key)
             && let Some(tx) = &self.tx
             && tx.try_send(key.clone()).is_ok()
         {
-            self.attempted.insert(key.clone());
             self.pending.insert(key);
         }
         None
@@ -171,6 +223,59 @@ async fn fetch(client: &reqwest::Client, key: &Key) -> Option<ColorImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn key(id: u64) -> Key {
+        Key {
+            guild: false,
+            id,
+            hash: "0123456789abcdef0123456789abcdef".into(),
+        }
+    }
+    #[test]
+    fn offscreen_does_not_queue_and_visible_requests_deduplicate() {
+        let (tx, mut jobs) = tokio::sync::mpsc::channel(32);
+        let mut cache = Cache::default();
+        cache.tx = Some(tx);
+        assert!(cache.get(key(1), false).is_none());
+        assert!(jobs.try_recv().is_err());
+        cache.get(key(1), true);
+        cache.get(key(1), true);
+        assert_eq!(jobs.try_recv().unwrap(), key(1));
+        assert!(jobs.try_recv().is_err());
+        assert_eq!(cache.pending.len(), 1);
+    }
+    #[test]
+    fn failed_portraits_back_off_then_retry_only_when_visible() {
+        let (tx, mut jobs) = tokio::sync::mpsc::channel(32);
+        let mut cache = Cache::default();
+        cache.tx = Some(tx);
+        cache
+            .failed
+            .insert(key(1), Instant::now() + Duration::from_secs(60));
+        cache.get(key(1), true);
+        assert!(jobs.try_recv().is_err());
+        cache
+            .failed
+            .insert(key(1), Instant::now() - Duration::from_secs(1));
+        cache.get(key(1), false);
+        assert!(jobs.try_recv().is_err());
+        cache.get(key(1), true);
+        assert_eq!(jobs.try_recv().unwrap(), key(1));
+    }
+    #[test]
+    fn recent_use_keeps_portrait_and_evicts_oldest_with_bounded_memory() {
+        let mut cache = Lru::default();
+        for id in 1..=128 {
+            cache.insert(key(id), id);
+        }
+        assert_eq!(cache.get(&key(1)), Some(1));
+        cache.insert(key(129), 129);
+        assert_eq!(cache.get(&key(2)), None);
+        assert_eq!(cache.get(&key(1)), Some(1));
+        for id in 130..1000 {
+            cache.insert(key(id), id);
+        }
+        assert_eq!(cache.entries.len(), 128);
+    }
     #[test]
     fn logout_cancels_and_cannot_reschedule_from_a_stale_ui_snapshot() {
         let mut cache = Cache::default();

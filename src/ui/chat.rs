@@ -38,6 +38,8 @@ mod tests {
             content: "A distinct message".into(),
             message_type: 0,
             call: None,
+            channel_id: 20,
+            ..Default::default()
         }
     }
     const START: u64 = 1_800_000_000_000;

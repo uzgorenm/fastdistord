@@ -1,6 +1,6 @@
 # Getting started
 
-A native Rust/fastframe Discord voice and text client. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, recording, or telemetry.
+A native Rust/fastframe Discord voice and text client. macOS Apple Silicon is the primary target. No Electron, webview, bot account, desktop RPC dependency, saved audio recordings, or telemetry.
 
 **Live-call behavior is not yet verified.** Discord's supported personal-user `voice` OAuth scope is restricted to approved partners. No qualifying generally available supported route was found for arbitrary existing server channels. This implementation therefore isolates an **unofficial personal-account adapter**, disabled until explicit risk acceptance in the app. It may violate Discord policy, cause account restrictions, or break without notice. It is not affiliated with Discord. Do not use an important account without understanding that risk.
 
@@ -11,7 +11,7 @@ A native Rust/fastframe Discord voice and text client. macOS Apple Silicon is th
 - Songbird Opus/UDP transport plus Davey/OpenMLS DAVE; a small vendored patch refuses unready/non-DAVE audio instead of falling back to transport-only encryption
 - CPAL capture/output, established Rubato sample-rate conversion, bounded buffers, multi-speaker receive mixing
 - Immediate atomic mute/deafen/PTT gates, epoch invalidation, late pre-send gate, default muted
-- Global Ctrl+Shift+Space PTT when the OS backend supports it; visible press-and-hold fallback
+- Optional configurable local/global shortcuts; visible press-and-hold talk fallback
 - Session-only credentials by default; explicitly optional macOS Keychain save, removed on logout
 - Audio shutdown on leave/quit/logout, stale join cancellation, safe stop on disconnect/move/permission changes
 
@@ -63,7 +63,7 @@ Discord’s standard OAuth scopes can identify an account and list basic guild i
 
 ## Limits
 
-No AEC, noise suppression or automatic gain control. Speakerphone use may echo. Bluetooth routes and sleep/wake require hardware testing. No claim of production-grade background PTT safety: platform key-release reliability still needs live verification; focus/visibility transitions close the gate. Native Wayland global shortcuts are unavailable with the selected backend and use the visible hold-to-talk fallback.
+Optional RNNoise suppression and conservative automatic gain are off by default. Echo cancellation is unavailable, so speakerphone use may echo. Bluetooth routes and sleep/wake require hardware testing. No claim of production-grade background PTT safety: platform key-release reliability still needs live verification; focus/visibility transitions close the gate. Native Wayland global shortcuts are unavailable with the selected backend and use the visible hold-to-talk fallback.
 
 Initial guild voice snapshots and later updates seed the roster, but this adapter does not yet implement every undocumented personal Gateway payload; missing names may display a user ID. Stage channels are excluded. Large servers are bounded to protect memory. Permission/channel updates conservatively stop a call. Not every browser/client capability, account challenge or protocol variation is supported.
 

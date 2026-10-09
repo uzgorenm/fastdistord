@@ -32,7 +32,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSMicrophoneUsageDescription</key><string>Fastdistord uses your microphone only after you join a voice channel. Leave or quit to release it.</string>
+<key>NSMicrophoneUsageDescription</key><string>Fastdistord uses the selected microphone when you join a call or explicitly start a local microphone test in Settings. Leave, stop the test, or quit to release it.</string>
 </dict></plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist"

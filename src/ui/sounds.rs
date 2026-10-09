@@ -10,7 +10,13 @@ use std::sync::{
     mpsc,
 };
 use std::time::Duration;
+#[derive(Clone)]
+struct Lease {
+    authority: Arc<AtomicU64>,
+    sequence: u64,
+}
 struct Message {
+    lease: Option<Lease>,
     cue: Cue,
     epoch: u64,
     output: Option<String>,
@@ -97,6 +103,7 @@ impl Player {
             .store(0.0_f32.to_bits(), Ordering::Release);
         if let Some(tx) = &self.tx {
             let _ = tx.try_send(Message {
+                lease: None,
                 cue: Cue::Stop,
                 epoch,
                 output: None,
@@ -136,6 +143,10 @@ impl Player {
             };
             if let Some(tx) = &self.tx {
                 let _ = tx.try_send(Message {
+                    lease: Some(Lease {
+                        authority: state.sound_authority.clone(),
+                        sequence: state.sound_sequence,
+                    }),
                     cue,
                     epoch,
                     output: state.selected_output.clone(),
@@ -167,6 +178,7 @@ fn open(
             config.config(),
             message.cue,
             message.epoch,
+            message.lease.clone(),
             shared,
             errors,
         )?,
@@ -175,6 +187,7 @@ fn open(
             config.config(),
             message.cue,
             message.epoch,
+            message.lease.clone(),
             shared,
             errors,
         )?,
@@ -183,6 +196,7 @@ fn open(
             config.config(),
             message.cue,
             message.epoch,
+            message.lease.clone(),
             shared,
             errors,
         )?,
@@ -191,6 +205,7 @@ fn open(
             config.config(),
             message.cue,
             message.epoch,
+            message.lease.clone(),
             shared,
             errors,
         )?,
@@ -199,6 +214,7 @@ fn open(
             config.config(),
             message.cue,
             message.epoch,
+            message.lease.clone(),
             shared,
             errors,
         )?,
@@ -212,6 +228,7 @@ fn build<T: SizedSample + FromSample<f32>>(
     config: cpal::StreamConfig,
     cue: Cue,
     epoch: u64,
+    lease: Option<Lease>,
     shared: Arc<Shared>,
     errors: mpsc::SyncSender<&'static str>,
 ) -> anyhow::Result<Stream> {
@@ -222,7 +239,10 @@ fn build<T: SizedSample + FromSample<f32>>(
     Ok(device.build_output_stream(
         config,
         move |out: &mut [T], _| {
-            let valid = shared.epoch.load(Ordering::Acquire) == epoch;
+            let valid = shared.epoch.load(Ordering::Acquire) == epoch
+                && lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.authority.load(Ordering::Acquire) == lease.sequence);
             let volume = f32::from_bits(shared.volume.load(Ordering::Acquire));
             for samples in out.chunks_mut(channels) {
                 let value = if valid {

@@ -20,6 +20,7 @@ fn update(state: &Shared, repaint: &Repaint, f: impl FnOnce(&mut UiState)) {
     if let Ok(mut s) = state.lock() {
         f(&mut s);
         crate::calls::refresh(&mut s);
+        crate::calls::sync_sound_authority(&s);
         s.revision = s.revision.wrapping_add(1);
     }
     if let Some(wake) = repaint {
@@ -45,11 +46,101 @@ fn reset_chat(
         s.selected_text_channel = None;
         s.messages.clear();
         s.chat_busy = false;
+        s.history_loading = false;
+        s.history_has_more = false;
         s.chat_sending = false;
         s.chat_status = "Choose a text channel to read its latest 50 messages.".into();
     });
 }
+enum MessageActionOutcome {
+    Reply(crate::messaging::ChatMessage),
+    Edited(crate::messaging::ChatMessage),
+    Reacted,
+    Read,
+}
+fn reconcile_history(
+    journal: &mut Option<crate::messaging::HistoryJournal>,
+    result: Result<Vec<crate::messaging::ChatMessage>>,
+) -> Result<Vec<crate::messaging::ChatMessage>> {
+    let journal = journal.take();
+    result.and_then(|messages| {
+        journal
+            .ok_or_else(|| anyhow::anyhow!("History request was superseded; refresh messages"))?
+            .reconcile(messages)
+    })
+}
+fn apply_action_message(
+    state: &mut UiState,
+    message: crate::messaging::ChatMessage,
+    journal: Option<&crate::messaging::HistoryJournal>,
+) {
+    let id = message.id;
+    if let Some(journal) = journal {
+        match journal.reconcile(vec![message]) {
+            Ok(messages) => {
+                if let Some(message) = messages.into_iter().find(|message| message.id == id) {
+                    crate::messaging::insert_message(&mut state.messages, message);
+                }
+            }
+            Err(_) => {
+                state.chat_status =
+                    "Messages changed during the request; refresh to confirm current content".into()
+            }
+        }
+    }
+}
+fn reset_account_view(state: &mut UiState) {
+    crate::calls::cue(state, crate::calls::Cue::Stop);
+    *state = UiState {
+        preferences: state.preferences.clone(),
+        preferences_status: state.preferences_status.clone(),
+        notification_status: state.notification_status.clone(),
+        update_state: state.update_state.clone(),
+        incoming_sequence: state.incoming_sequence,
+        sound_authority: state.sound_authority.clone(),
+        sound_sequence: state.sound_sequence,
+        revision: state.revision,
+        ..Default::default()
+    };
+    crate::calls::sync_sound_authority(state);
+}
+fn clear_notifications(service: &crate::notifications::NotificationService, state: &Shared) {
+    if let Some(generation) = state
+        .lock()
+        .ok()
+        .and_then(|s| s.incoming_call.as_ref().map(|c| c.generation))
+    {
+        service.clear(generation);
+    }
+    service.clear_all();
+}
+fn persist_preferences(state: &Shared, repaint: &Repaint) {
+    let outcome = crate::preferences::save(&snapshot(state).preferences);
+    update(state, repaint, |s| {
+        s.preferences_status = if outcome.is_ok() {
+            String::new()
+        } else {
+            "Settings apply for this launch, but could not be saved".into()
+        }
+    });
+}
+fn stop_mic_test(
+    test: &mut crate::mic_test::MicTestController,
+    scope: &mut u64,
+    state: &Shared,
+    repaint: &Repaint,
+) {
+    *scope = scope.wrapping_add(1);
+    test.stop();
+    update(state, repaint, |s| s.mic_test = test.status());
+}
 enum ResultEvent {
+    MicAllowed(u64, Result<()>),
+    NotificationPermission(crate::notifications::Permission),
+    NotificationDelivered(u64, crate::notifications::Delivery),
+    Update(crate::updates::UpdateState),
+    Older(u64, u64, u64, Result<crate::messaging::HistoryPage>),
+    MessageAction(u64, u64, u64, Result<MessageActionOutcome>),
     Account(
         u64,
         Result<(PersonalAccount, Account, Vec<Guild>)>,
@@ -135,6 +226,8 @@ fn select_dm_for_read(state: &mut UiState, channel: u64) -> bool {
     state.selected_dm = Some(channel);
     state.selected_text_channel = Some(channel);
     state.messages.clear();
+    state.history_has_more = false;
+    state.history_loading = false;
     state.chat_busy = true;
     state.chat_status = "Loading messages…".into();
     true
@@ -281,7 +374,18 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     let mut ring_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut chat_generation = 0_u64;
+    let mut history_journal: Option<crate::messaging::HistoryJournal> = None;
+    let mut action_journal: Option<crate::messaging::HistoryJournal> = None;
     let mut social_request = SocialRequest::default();
+    let mut mic_test = crate::mic_test::MicTestController::default();
+    let mut mic_scope = 0_u64;
+    let mut mic_running = false;
+    let mut mic_permission_task: Option<tokio::task::JoinHandle<()>> = None;
+    let notifications = crate::notifications::NotificationService::default();
+    let mut action_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut action_scope = 0_u64;
+    let mut update_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut permission_task: Option<tokio::task::JoinHandle<()>> = None;
     let (results_tx, mut results) = async_mpsc::channel(8);
     let (voice_tx, mut voice_events) = async_mpsc::unbounded_channel();
     let mut meter_tick = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -294,6 +398,26 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
         Meter,
         Recovery,
     }
+    if snapshot(&state).preferences.desktop_notifications {
+        let service = notifications.clone();
+        let tx = results_tx.clone();
+        permission_task = Some(tokio::spawn(async move {
+            let permission = service.refresh_permission().await;
+            let _ = tx
+                .send(ResultEvent::NotificationPermission(permission))
+                .await;
+        }));
+    }
+    if snapshot(&state).preferences.check_updates {
+        let tx = results_tx.clone();
+        update(&state, &repaint, |s| {
+            s.update_state = crate::updates::UpdateState::Checking
+        });
+        update_task = Some(tokio::spawn(async move {
+            let value = crate::updates::check_for_updates(fastdistord::RELEASE_VERSION).await;
+            let _ = tx.send(ResultEvent::Update(value)).await;
+        }));
+    }
     loop {
         let incoming = tokio::select! {
             biased;
@@ -302,19 +426,101 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
             event=results.recv()=>Incoming::Result(event),
             event=voice_events.recv()=>Incoming::Voice(event),
             _=recovery_tick.tick(),if signal_retry.is_some()||recovery.retry.is_some()||signal_deadline.is_some()=>Incoming::Recovery,
-            _=meter_tick.tick(),if transport.is_some()&&ui_visible&&!gate.is_muted()&&!gate.is_deafened()=>Incoming::Meter,
+            _=meter_tick.tick(),if (transport.is_some()&&ui_visible&&!gate.is_muted()&&!gate.is_deafened()) || mic_running || state.lock().is_ok_and(|s| s.incoming_call.is_some())=>Incoming::Meter,
         };
         match incoming {
             Incoming::Command(command) => {
                 let Some(command) = command else {
                     break;
                 };
+                let answering = matches!(&command, Command::AnswerIncoming { .. });
+                // Validate before any cancellation or side effect.
+                if let Command::AnswerIncoming {
+                    channel,
+                    generation: call_generation,
+                } = &command
+                    && (!signal_ready
+                        || gateway.is_none()
+                        || !crate::calls::incoming_matches(
+                            &snapshot(&state),
+                            *channel,
+                            *call_generation,
+                        ))
+                {
+                    continue;
+                }
+                if matches!(
+                    &command,
+                    Command::SelectDm(_)
+                        | Command::SelectGuild(_)
+                        | Command::SelectTextChannel(_)
+                        | Command::OpenDm(_)
+                        | Command::Connect { .. }
+                        | Command::Logout
+                        | Command::Reconnect
+                ) {
+                    action_scope = action_scope.wrapping_add(1);
+                    history_journal = None;
+                    action_journal = None;
+                    if let Some(task) = action_task.take() {
+                        task.abort();
+                    }
+                    update(&state, &repaint, |s| {
+                        s.message_action_busy = false;
+                        s.message_action_status.clear();
+                    });
+                }
+                if matches!(
+                    &command,
+                    Command::StopMicTest
+                        | Command::SetUiVisible(false)
+                        | Command::SetDevices { .. }
+                        | Command::SetProcessing(_)
+                        | Command::Connect { .. }
+                        | Command::Logout
+                        | Command::Join { .. }
+                        | Command::CallDm(_)
+                        | Command::AnswerIncoming { .. }
+                        | Command::Leave
+                        | Command::Reconnect
+                        | Command::Quit
+                ) {
+                    if let Some(task) = mic_permission_task.take() {
+                        task.abort();
+                    }
+                    stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                    mic_running = false;
+                }
                 if matches!(
                     &command,
                     Command::Connect { .. }
                         | Command::Logout
                         | Command::Join { .. }
                         | Command::CallDm(_)
+                        | Command::AnswerIncoming { .. }
+                        | Command::Leave
+                        | Command::Reconnect
+                        | Command::Quit
+                ) {
+                    clear_notifications(&notifications, &state);
+                    update(&state, &repaint, |s| {
+                        crate::calls::clear_incoming(s);
+                        crate::calls::cue(s, crate::calls::Cue::Stop);
+                    });
+                }
+                if matches!(&command, Command::Connect { .. } | Command::Logout) {
+                    update(&state, &repaint, |s| {
+                        s.chat_activity = Default::default();
+                        s.dismissed_incoming = None;
+                    });
+                }
+                if matches!(
+                    &command,
+                    Command::Connect { .. }
+                        | Command::Logout
+                        | Command::Join { .. }
+                        | Command::CallDm(_)
+                        | Command::AnswerIncoming { .. }
                         | Command::Leave
                         | Command::Reconnect
                         | Command::Quit
@@ -372,6 +578,276 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         repaint = Some(callback);
                     }
                     Command::SetUiVisible(visible) => ui_visible = visible,
+                    Command::StartMicTest => {
+                        let current = snapshot(&state);
+                        if mic_permission_task.is_some()
+                            || !ui_visible
+                            || pending.is_some()
+                            || transport.is_some()
+                            || current.current_call.is_some()
+                        {
+                            continue;
+                        }
+                        stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                        mic_running = false;
+                        let scope = mic_scope;
+                        let tx = results_tx.clone();
+                        mic_permission_task = Some(tokio::spawn(async move {
+                            let result = crate::microphone::request_for_join().await.map(|_| ());
+                            let _ = tx.send(ResultEvent::MicAllowed(scope, result)).await;
+                        }));
+                    }
+                    Command::StopMicTest => {}
+                    Command::PlayMicTest => {
+                        if ui_visible && pending.is_none() && transport.is_none() {
+                            let result = mic_test.play();
+                            update(&state, &repaint, |s| {
+                                s.mic_test = mic_test.status();
+                                if let Err(error) = result {
+                                    s.mic_test.error = Some(error.to_string());
+                                }
+                            });
+                        }
+                    }
+                    Command::SetProcessing(value) => {
+                        update(&state, &repaint, |s| s.preferences.processing = value);
+                        if let Some(t) = &transport {
+                            t.set_audio_preferences(&snapshot(&state).preferences);
+                        }
+                        persist_preferences(&state, &repaint);
+                    }
+                    Command::SetParticipantVolume { user_id, volume } => {
+                        let current = snapshot(&state);
+                        if !current.participants.iter().any(|p| p.id == user_id) {
+                            continue;
+                        }
+                        let mut accepted = false;
+                        update(&state, &repaint, |s| {
+                            accepted = s.preferences.set_participant_volume(user_id, volume);
+                            if !accepted {
+                                s.preferences_status =
+                                    "Participant settings are full or the volume is invalid".into();
+                            }
+                        });
+                        if !accepted {
+                            continue;
+                        }
+                        if let Some(t) = &transport {
+                            t.set_audio_preferences(&snapshot(&state).preferences);
+                        }
+                        persist_preferences(&state, &repaint);
+                    }
+                    Command::SetAppearance(value) => {
+                        update(&state, &repaint, |s| {
+                            s.preferences.appearance = value.normalize()
+                        });
+                        persist_preferences(&state, &repaint);
+                    }
+                    Command::SetShortcuts(value) => {
+                        if value.validate().is_ok() {
+                            gate.set_ptt_pressed(None);
+                            update(&state, &repaint, |s| s.preferences.shortcuts = value);
+                            persist_preferences(&state, &repaint);
+                        }
+                    }
+                    Command::SetDesktopNotifications(enabled) => {
+                        let active = notifications.set_enabled(enabled);
+                        update(&state, &repaint, |s| {
+                            s.preferences.desktop_notifications = enabled;
+                            s.notification_status = if active {
+                                "Desktop notifications enabled"
+                            } else if enabled {
+                                "Request notification permission to enable alerts for this launch"
+                            } else {
+                                "Desktop notifications are off"
+                            }
+                            .into();
+                        });
+                        persist_preferences(&state, &repaint);
+                    }
+                    Command::RequestNotificationPermission => {
+                        if permission_task.is_some() {
+                            continue;
+                        }
+                        let service = notifications.clone();
+                        let tx = results_tx.clone();
+                        permission_task = Some(tokio::spawn(async move {
+                            let permission = service.request_permission().await;
+                            let _ = tx
+                                .send(ResultEvent::NotificationPermission(permission))
+                                .await;
+                        }));
+                    }
+                    Command::DeclineIncoming {
+                        channel,
+                        generation: call_generation,
+                    } => {
+                        let current = snapshot(&state);
+                        if !crate::calls::incoming_matches(&current, channel, call_generation) {
+                            continue;
+                        }
+                        clear_notifications(&notifications, &state);
+                        update(&state, &repaint, |s| {
+                            crate::calls::clear_incoming(s);
+                            s.status = "Incoming ring dismissed".into();
+                        });
+                        if let (Some(c), Some(own)) =
+                            (client.clone(), current.account.map(|a| a.id))
+                        {
+                            let tx = results_tx.clone();
+                            let account_scope = generation;
+                            tokio::spawn(async move {
+                                let failed = !matches!(
+                                    tokio::time::timeout(
+                                        Duration::from_secs(2),
+                                        c.stop_ringing(channel, &[own])
+                                    )
+                                    .await,
+                                    Ok(Ok(()))
+                                );
+                                let _ = tx
+                                    .send(ResultEvent::StoppedRing(account_scope, channel, failed))
+                                    .await;
+                            });
+                        }
+                    }
+                    Command::CheckForUpdates | Command::SetUpdateChecks(_) => {
+                        if let Command::SetUpdateChecks(enabled) = command {
+                            update(&state, &repaint, |s| s.preferences.check_updates = enabled);
+                            persist_preferences(&state, &repaint);
+                            if !enabled {
+                                continue;
+                            }
+                        }
+                        if update_task.is_none() {
+                            let tx = results_tx.clone();
+                            update(&state, &repaint, |s| {
+                                s.update_state = crate::updates::UpdateState::Checking
+                            });
+                            update_task = Some(tokio::spawn(async move {
+                                let value =
+                                    crate::updates::check_for_updates(fastdistord::RELEASE_VERSION)
+                                        .await;
+                                let _ = tx.send(ResultEvent::Update(value)).await;
+                            }));
+                        }
+                    }
+                    Command::LoadOlderMessages => {
+                        let current = snapshot(&state);
+                        if current.chat_busy
+                            || current.history_loading
+                            || !current.history_has_more
+                            || current.messages.len() >= crate::messaging::MAX_HISTORY
+                        {
+                            continue;
+                        }
+                        let Some(channel) = current
+                            .selected_text_channel
+                            .filter(|channel| chat_channel_allowed(&current, *channel))
+                        else {
+                            continue;
+                        };
+                        let Some(before) = current.messages.iter().map(|m| m.id).min() else {
+                            continue;
+                        };
+                        if let Some(c) = client.clone() {
+                            let tx = results_tx.clone();
+                            let (id, scope) = (generation, chat_generation);
+                            update(&state, &repaint, |s| {
+                                s.history_loading = true;
+                                s.chat_busy = true;
+                            });
+                            history_journal = Some(crate::messaging::HistoryJournal::new(channel));
+                            chat_task = Some(tokio::spawn(async move {
+                                let result = c.message_page(channel, Some(before)).await;
+                                let _ = tx
+                                    .send(ResultEvent::Older(id, scope, channel, result))
+                                    .await;
+                            }));
+                        }
+                    }
+                    Command::ReplyMessage {
+                        channel_id,
+                        message_id,
+                        ..
+                    }
+                    | Command::EditMessage {
+                        channel_id,
+                        message_id,
+                        ..
+                    }
+                    | Command::ReactMessage {
+                        channel_id,
+                        message_id,
+                        ..
+                    }
+                    | Command::MarkChannelRead {
+                        channel_id,
+                        message_id,
+                    } => {
+                        let current = snapshot(&state);
+                        if current.message_action_busy
+                            || current.chat_busy
+                            || current.selected_text_channel != Some(channel_id)
+                            || !chat_channel_allowed(&current, channel_id)
+                        {
+                            continue;
+                        }
+                        let Some(message) = current.messages.iter().find(|m| m.id == message_id)
+                        else {
+                            continue;
+                        };
+                        let capabilities =
+                            message.capabilities(current.account.as_ref().map(|a| a.id));
+                        let valid = match &command {
+                            Command::ReplyMessage { .. } => capabilities.reply,
+                            Command::EditMessage { .. } => capabilities.edit,
+                            Command::ReactMessage { .. } => capabilities.react,
+                            Command::MarkChannelRead { .. } => {
+                                ui_visible
+                                    && current.messages.last().is_some_and(|m| m.id == message_id)
+                            }
+                            _ => false,
+                        };
+                        if !valid {
+                            continue;
+                        }
+                        if let Some(c) = client.clone() {
+                            action_scope = action_scope.wrapping_add(1);
+                            let tx = results_tx.clone();
+                            let (id, scope) = (generation, action_scope);
+                            update(&state, &repaint, |s| {
+                                s.message_action_busy = true;
+                                s.message_action_status = "Applying once…".into();
+                            });
+                            action_journal =
+                                Some(crate::messaging::HistoryJournal::new(channel_id));
+                            action_task = Some(tokio::spawn(async move {
+                                let result = match command {
+                                    Command::ReplyMessage { content, .. } => c
+                                        .reply_message(channel_id, message_id, &content)
+                                        .await
+                                        .map(MessageActionOutcome::Reply),
+                                    Command::EditMessage { content, .. } => c
+                                        .edit_message(channel_id, message_id, &content)
+                                        .await
+                                        .map(MessageActionOutcome::Edited),
+                                    Command::ReactMessage { emoji, .. } => c
+                                        .react_message(channel_id, message_id, &emoji)
+                                        .await
+                                        .map(|()| MessageActionOutcome::Reacted),
+                                    Command::MarkChannelRead { .. } => c
+                                        .acknowledge_message(channel_id, message_id)
+                                        .await
+                                        .map(|()| MessageActionOutcome::Read),
+                                    _ => unreachable!(),
+                                };
+                                let _ = tx
+                                    .send(ResultEvent::MessageAction(id, scope, channel_id, result))
+                                    .await;
+                            }));
+                        }
+                    }
                     Command::Connect {
                         token,
                         risk_accepted,
@@ -444,6 +920,14 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         match crate::credential::load() {
                             Ok(token) => {
                                 social_request.cancel();
+                                clear_notifications(&notifications, &state);
+                                stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                                mic_running = false;
+                                update(&state, &repaint, |s| {
+                                    crate::calls::clear_incoming(s);
+                                    s.dismissed_incoming = None;
+                                    s.chat_activity = Default::default();
+                                });
                                 reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                                 generation = generation.wrapping_add(1);
                                 join_generation = join_generation.wrapping_add(1);
@@ -525,9 +1009,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         roster.clear();
                         complete_rosters.clear();
                         update(&state, &repaint, |s| {
-                            let revision = s.revision;
-                            *s = UiState::default();
-                            s.revision = revision;
+                            reset_account_view(s);
                             s.status = if forgotten.is_ok() {
                                 "Signed out. Credential removed from memory and Keychain.".into()
                             } else {
@@ -588,6 +1070,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             chat_generation = chat_generation.wrapping_add(1);
                             let (id, request, tx) =
                                 (generation, chat_generation, results_tx.clone());
+                            history_journal = Some(crate::messaging::HistoryJournal::new(channel));
                             chat_task = Some(tokio::spawn(async move {
                                 let result = c.messages(channel).await;
                                 let _ = tx
@@ -648,10 +1131,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             update(&state, &repaint, |s| {
                                 s.selected_dm = None;
                                 s.selected_text_channel = Some(channel);
+                                s.history_loading = false;
+                                s.history_has_more = false;
                                 s.messages.clear();
                                 s.chat_busy = true;
                                 s.chat_status = "Loading message history…".into();
                             });
+                            history_journal = Some(crate::messaging::HistoryJournal::new(channel));
                             chat_task = Some(tokio::spawn(async move {
                                 let result = c.messages(channel).await;
                                 let _ = tx
@@ -662,7 +1148,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     }
                     Command::RefreshMessages => {
                         let s = snapshot(&state);
-                        if s.chat_busy {
+                        if s.chat_busy || s.message_action_busy {
                             continue;
                         }
                         if let (Some(c), Some(channel)) = (client.clone(), s.selected_text_channel)
@@ -674,6 +1160,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 s.chat_busy = true;
                                 s.chat_status = "Refreshing history…".into();
                             });
+                            history_journal = Some(crate::messaging::HistoryJournal::new(channel));
                             chat_task = Some(tokio::spawn(async move {
                                 let result = c.messages(channel).await;
                                 let _ = tx
@@ -688,6 +1175,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     } => {
                         let s = snapshot(&state);
                         if s.chat_busy
+                            || s.message_action_busy
                             || s.selected_text_channel != Some(channel_id)
                             || !chat_channel_allowed(&s, channel_id)
                         {
@@ -706,6 +1194,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 s.chat_sending = true;
                                 s.chat_status = "Sending once…".into();
                             });
+                            history_journal =
+                                Some(crate::messaging::HistoryJournal::new(channel_id));
                             chat_task = Some(tokio::spawn(async move {
                                 let result = c.send_message(channel_id, &content).await;
                                 let _ = tx
@@ -788,7 +1278,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 .await;
                         }
                     }
-                    Command::CallDm(channel_id) => {
+                    Command::CallDm(channel_id)
+                    | Command::AnswerIncoming {
+                        channel: channel_id,
+                        ..
+                    } => {
                         let s = snapshot(&state);
                         if !signal_ready
                             || gateway.is_none()
@@ -818,7 +1312,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         pending = Some(PendingVoice {
                             guild: channel_id,
                             private: true,
-                            ring_pending: true,
+                            ring_pending: !answering,
                             channel: channel_id,
                             allow_initial_connect: true,
                             ..Default::default()
@@ -920,6 +1414,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         update(&state, &repaint, |s| s.call_sounds = value)
                     }
                     Command::SetSoundVolume(value) => {
+                        if !value.is_finite() {
+                            continue;
+                        }
                         update(&state, &repaint, |s| s.sound_volume = value.clamp(0.0, 1.0))
                     }
                     Command::SetPtt(value) => {
@@ -928,6 +1425,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         update(&state, &repaint, |s| s.ptt_enabled = value);
                     }
                     Command::SetOutputVolume(value) => {
+                        if !value.is_finite() {
+                            continue;
+                        }
                         let value = value.clamp(0.0, 2.0);
                         if let Some(t) = &mut transport {
                             t.set_output_volume(value);
@@ -970,6 +1470,129 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
             }
             Incoming::Result(event) => match event {
+                Some(ResultEvent::MicAllowed(scope, result)) if scope == mic_scope => {
+                    mic_permission_task.take();
+                    if ui_visible
+                        && pending.is_none()
+                        && transport.is_none()
+                        && snapshot(&state).current_call.is_none()
+                    {
+                        let current = snapshot(&state);
+                        let result = result.and_then(|()| {
+                            mic_test.start(
+                                AudioConfig {
+                                    input_device: current.selected_input,
+                                    output_device: current.selected_output,
+                                    output_volume: current.output_volume.min(1.0),
+                                },
+                                current.preferences.processing,
+                            )
+                        });
+                        mic_running = result.is_ok();
+                        update(&state, &repaint, |s| {
+                            s.microphone_permission = crate::microphone::status();
+                            s.mic_test = mic_test.status();
+                            if let Err(error) = result {
+                                s.mic_test.phase = crate::mic_test::TestPhase::Failed;
+                                s.mic_test.error = Some(error.to_string());
+                            }
+                        });
+                    }
+                }
+                Some(ResultEvent::NotificationPermission(permission)) => {
+                    permission_task.take();
+                    let enabled = snapshot(&state).preferences.desktop_notifications
+                        && notifications.set_enabled(true);
+                    update(&state, &repaint, |s| {
+                        s.notification_status = if enabled {
+                            "Desktop notifications enabled".into()
+                        } else {
+                            permission.label().into()
+                        }
+                    });
+                }
+                Some(ResultEvent::NotificationDelivered(scope, delivery)) => {
+                    if snapshot(&state)
+                        .incoming_call
+                        .as_ref()
+                        .is_some_and(|call| call.generation == scope)
+                    {
+                        update(&state, &repaint, |s| {
+                            s.notification_status = delivery.label().into()
+                        });
+                    }
+                }
+                Some(ResultEvent::Update(value)) => {
+                    update_task.take();
+                    update(&state, &repaint, |s| s.update_state = value);
+                }
+                Some(ResultEvent::Older(id, scope, channel, result))
+                    if id == generation
+                        && scope == chat_generation
+                        && snapshot(&state).selected_text_channel == Some(channel) =>
+                {
+                    chat_task.take();
+                    let result = result.and_then(|mut page| {
+                        page.messages = reconcile_history(&mut history_journal, Ok(page.messages))?;
+                        Ok(page)
+                    });
+                    update(&state, &repaint, |s| {
+                        s.chat_busy = false;
+                        s.history_loading = false;
+                        match result {
+                            Ok(page) => {
+                                crate::messaging::merge_history(&mut s.messages, page.messages);
+                                s.history_has_more = page.has_more
+                                    && s.messages.len() < crate::messaging::MAX_HISTORY;
+                                s.chat_status =
+                                    if s.messages.len() >= crate::messaging::MAX_HISTORY {
+                                        "History limit reached · showing up to 200 messages"
+                                    } else {
+                                        "Earlier messages loaded"
+                                    }
+                                    .into();
+                            }
+                            Err(error) => s.chat_status = error.to_string(),
+                        }
+                    });
+                }
+                Some(ResultEvent::MessageAction(id, scope, channel, result))
+                    if id == generation && scope == action_scope =>
+                {
+                    action_task.take();
+                    let journal = action_journal.take();
+                    update(&state, &repaint, |s| {
+                        s.message_action_busy = false;
+                        match result {
+                            Ok(MessageActionOutcome::Read) => {
+                                s.message_action_status =
+                                    "Read request accepted · awaiting Gateway update".into();
+                            }
+                            Ok(MessageActionOutcome::Reply(message)) => {
+                                if s.selected_text_channel == Some(channel) {
+                                    apply_action_message(s, message, journal.as_ref());
+                                    s.sent_revision = s.sent_revision.wrapping_add(1);
+                                }
+                                s.message_action_status = "Reply sent".into();
+                            }
+                            Ok(MessageActionOutcome::Edited(message)) => {
+                                if s.selected_text_channel == Some(channel) {
+                                    apply_action_message(s, message, journal.as_ref());
+                                }
+                                s.message_action_status = "Edit saved".into();
+                            }
+                            Ok(MessageActionOutcome::Reacted) => {
+                                s.message_action_status =
+                                    "Reaction submitted · awaiting Gateway update".into()
+                            }
+                            Err(error) => {
+                                s.message_action_status = format!(
+                                    "{error} Check history before retrying; no automatic retry was made."
+                                )
+                            }
+                        }
+                    });
+                }
                 Some(ResultEvent::Social(id, request, friends, channels))
                     if id == generation && request == social_request.generation =>
                 {
@@ -1002,10 +1625,14 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 crate::social::sort_by_activity(&mut s.friends, &s.direct_channels);
                                 s.selected_dm = Some(channel_id);
                                 s.selected_text_channel = Some(channel_id);
+                                s.history_has_more = false;
+                                s.history_loading = false;
                                 s.chat_busy = true;
                             });
                             if let Some(c) = client.clone() {
                                 let tx = results_tx.clone();
+                                history_journal =
+                                    Some(crate::messaging::HistoryJournal::new(channel_id));
                                 chat_task = Some(tokio::spawn(async move {
                                     let result = c.messages(channel_id).await;
                                     let _ = tx
@@ -1028,9 +1655,11 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     update(&state, &repaint, |s| {
                         if s.current_call
                             .as_ref()
-                            .is_some_and(|call| call.channel == channel)
+                            .is_none_or(|call| call.channel == channel)
                         {
-                            s.status = "Remote ring cancellation was not confirmed".into();
+                            s.status =
+                                "Local ring stopped; remote ring cancellation was not confirmed"
+                                    .into();
                         }
                     });
                 }
@@ -1068,6 +1697,10 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         && snapshot(&state).selected_text_channel == Some(channel) =>
                 {
                     chat_task.take();
+                    let has_more = result
+                        .as_ref()
+                        .is_ok_and(|messages| messages.len() == crate::messaging::MAX_HISTORY_PAGE);
+                    let result = reconcile_history(&mut history_journal, result);
                     update(&state, &repaint, |s| {
                         s.chat_busy = false;
                         match result {
@@ -1083,6 +1716,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                         &s.direct_channels,
                                     );
                                 }
+                                s.history_has_more =
+                                    has_more && messages.len() < crate::messaging::MAX_HISTORY;
+                                s.history_loading = false;
                                 s.messages = messages;
                                 s.chat_status =
                                     "Latest 50 messages · Refresh to check for updates.".into();
@@ -1097,6 +1733,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         && snapshot(&state).selected_text_channel == Some(channel) =>
                 {
                     chat_task.take();
+                    let journal = history_journal.take();
                     update(&state, &repaint, |s| {
                         s.chat_busy = false;
                         s.chat_sending = false;
@@ -1108,7 +1745,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                     message.id,
                                 );
                                 crate::social::sort_by_activity(&mut s.friends, &s.direct_channels);
-                                crate::messaging::insert_message(&mut s.messages, message);
+                                apply_action_message(s, message, journal.as_ref());
                                 s.sent_revision = s.sent_revision.wrapping_add(1);
                                 s.chat_status = "Message sent.".into();
                             }
@@ -1233,6 +1870,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
                 Some(ResultEvent::Transport(id, result)) if id == join_generation => match result {
                     Ok(t) => {
+                        t.set_audio_preferences(&snapshot(&state).preferences);
                         let ready = t.media_ready();
                         recovery.config = Some(t.device_config());
                         recovery.retry = None;
@@ -1351,6 +1989,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     auth_rejected,
                     resume,
                 }) => {
+                    clear_notifications(&notifications, &state);
+                    stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                    mic_running = false;
+                    update(&state, &repaint, |s| {
+                        crate::calls::clear_incoming(s);
+                        s.chat_activity.mark_gap();
+                    });
                     if auth_rejected {
                         social_request.cancel();
                         let removed = !remembered_session || crate::credential::sign_out().is_ok();
@@ -1361,6 +2006,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                         update(&state, &repaint, |s| {
                             s.account = None;
+                            s.chat_activity = Default::default();
+                            s.dismissed_incoming = None;
                             s.social_busy = false;
                             s.selected_channel = None;
                             s.selected_guild = None;
@@ -1461,6 +2108,43 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     publish_roster_count(&state, pending.as_ref(), &roster);
                 }
                 Some(GatewayEvent::Dispatch { kind, data }) => {
+                    let own = state
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.account.as_ref().map(|a| a.id));
+                    if let Some(journal) = &mut history_journal {
+                        journal.record(&kind, &data, own);
+                    }
+                    if let Some(journal) = &mut action_journal {
+                        journal.record(&kind, &data, own);
+                    }
+                    let previous = snapshot(&state).incoming_call.map(|call| call.generation);
+                    update(&state, &repaint, |s| {
+                        let own = s.account.as_ref().map(|a| a.id);
+                        s.chat_activity.apply_dispatch(&kind, &data, own);
+                        crate::messaging::update_reactions(&mut s.messages, &kind, &data, own);
+                        crate::calls::observe_incoming(s, &kind, &data);
+                    });
+                    let incoming_call = snapshot(&state).incoming_call;
+                    let next = incoming_call.as_ref().map(|call| call.generation);
+                    if previous != next {
+                        if let Some(previous) = previous {
+                            notifications.clear(previous);
+                        }
+                        if let Some(call) = incoming_call {
+                            let service = notifications.clone();
+                            let tx = results_tx.clone();
+                            tokio::spawn(async move {
+                                let delivery = service.incoming(call.generation).await;
+                                let _ = tx
+                                    .send(ResultEvent::NotificationDelivered(
+                                        call.generation,
+                                        delivery,
+                                    ))
+                                    .await;
+                            });
+                        }
+                    }
                     if matches!(
                         kind.as_str(),
                         "PRESENCE_UPDATE" | "USER_UPDATE" | "MESSAGE_CREATE" | "VOICE_STATE_UPDATE"
@@ -1497,6 +2181,28 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 crate::messaging::insert_message(&mut s.messages, message);
                             });
                         }
+                    }
+                    if matches!(kind.as_str(), "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK")
+                        && let Some(channel) = account::snowflake(&data["channel_id"])
+                    {
+                        let deleted = if kind == "MESSAGE_DELETE" {
+                            account::snowflake(&data["id"])
+                                .into_iter()
+                                .collect::<Vec<_>>()
+                        } else {
+                            data["ids"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .take(100)
+                                .filter_map(account::snowflake)
+                                .collect()
+                        };
+                        update(&state, &repaint, |s| {
+                            if s.selected_text_channel == Some(channel) {
+                                s.messages.retain(|message| !deleted.contains(&message.id));
+                            }
+                        });
                     }
                     if kind == "MESSAGE_UPDATE" {
                         let selected = snapshot(&state);
@@ -1859,6 +2565,13 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     }
                 }
                 None => {
+                    clear_notifications(&notifications, &state);
+                    stop_mic_test(&mut mic_test, &mut mic_scope, &state, &repaint);
+                    mic_running = false;
+                    update(&state, &repaint, |s| {
+                        crate::calls::clear_incoming(s);
+                        s.chat_activity.mark_gap();
+                    });
                     signal_ready = false;
                     signal_retry = None;
                     signal_deadline = None;
@@ -2036,6 +2749,23 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                 }
             }
             Incoming::Meter => {
+                let old = snapshot(&state).incoming_call.map(|call| call.generation);
+                let test_status = mic_test.status();
+                mic_running = matches!(
+                    test_status.phase,
+                    crate::mic_test::TestPhase::Recording
+                        | crate::mic_test::TestPhase::Ready
+                        | crate::mic_test::TestPhase::Playing
+                );
+                update(&state, &repaint, |s| {
+                    s.mic_test = test_status;
+                    crate::calls::expire_incoming(s, Instant::now());
+                });
+                if let Some(old) = old
+                    && snapshot(&state).incoming_call.is_none()
+                {
+                    notifications.clear(old);
+                }
                 if let Some(t) = &transport
                     && let Ok(mut s) = state.lock()
                 {
@@ -2046,6 +2776,23 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
         }
     }
     gate.fail_closed();
+    mic_test.stop();
+    clear_notifications(&notifications, &state);
+    update(&state, &repaint, |s| {
+        crate::calls::clear_incoming(s);
+        crate::calls::cue(s, crate::calls::Cue::Stop);
+    });
+    for task in [
+        action_task,
+        update_task,
+        permission_task,
+        mic_permission_task,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        task.abort();
+    }
     if let Some(t) = chat_task {
         t.abort();
     }
@@ -2308,6 +3055,32 @@ fn permission_event_affects_call(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn account_reset_preserves_app_preferences_and_revokes_old_sound_lease() {
+        use std::sync::atomic::Ordering;
+        let mut state = UiState::default();
+        state.preferences.desktop_notifications = true;
+        state.preferences.processing.noise_suppression = true;
+        state.incoming_sequence = 41;
+        state.sound_sequence = 9;
+        state.sound_cue = crate::calls::Cue::Ring;
+        state.account = Some(Account {
+            id: 1,
+            avatar: None,
+            name: "Owner".into(),
+        });
+        crate::calls::sync_sound_authority(&state);
+        let old_authority = state.sound_authority.clone();
+        let old_lease = old_authority.load(Ordering::Acquire);
+        reset_account_view(&mut state);
+        assert!(state.account.is_none());
+        assert!(state.preferences.desktop_notifications);
+        assert!(state.preferences.processing.noise_suppression);
+        assert_eq!(state.incoming_sequence, 41);
+        assert!(Arc::ptr_eq(&state.sound_authority, &old_authority));
+        assert_ne!(old_authority.load(Ordering::Acquire), old_lease);
+        assert!(state.incoming_call.is_none());
+    }
     use super::*;
     use serde_json::json;
     #[test]
@@ -2915,8 +3688,8 @@ mod tests {
                 author_id: 2,
                 author_name: "Tester".into(),
                 content: "Private test text".into(),
-                message_type: 0,
-                call: None,
+                channel_id: 10,
+                ..Default::default()
             }],
             chat_busy: true,
             muted: false,
