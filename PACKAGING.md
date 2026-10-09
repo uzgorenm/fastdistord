@@ -1,6 +1,6 @@
 # Packaging Fastdistord 0.01
 
-The public-facing version is **0.01**, tag **v0.01**; Cargo and native package metadata use SemVer **0.0.1**. Releases stay in the private repository. Publishing does not merge PR #1 or change repository visibility.
+The public-facing version is **0.01**, tag **v0.01**; Cargo and native package metadata use SemVer **0.0.1**. Releases stay in the private repository.
 
 ## Packages
 
