@@ -47,6 +47,14 @@ it does not implement or replace any encryption, MLS, codec, or packet format.
 
 ## Verification and limits
 
+Application ownership must account for this upstream `Driver` behavior:
+dropping any clone sends `CoreMessage::Poison` and shuts down its workers.
+Fastdistord transfers the original driver out of its pending setup guard on
+success; it must not clone and drop the original at that boundary. Offline
+transport regressions verify that the registered event handler survives the
+handoff and that aborted setup releases its workers. The vendor's clone/drop
+semantics are unchanged.
+
 The standalone driver accepts a private call with `guild_id: None`. Voice
 Identify and Resume then use the real DM channel ID as `server_id`; guild calls
 continue using their guild ID. Connect/disconnect event metadata keeps the

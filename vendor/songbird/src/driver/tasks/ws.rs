@@ -107,7 +107,9 @@ impl AuxNetwork {
 
     #[instrument(skip(self))]
     async fn run(&mut self, interconnect: &mut Interconnect) {
-        self.config.dave_handshake.record(crate::DaveStage::VoiceLoopStarted, 0);
+        self.config
+            .dave_handshake
+            .record(crate::DaveStage::VoiceLoopStarted, 0);
         let mut next_heartbeat = Instant::now() + self.heartbeat_interval;
 
         loop {
@@ -246,11 +248,15 @@ impl AuxNetwork {
         trace!("Sent heartbeat {:?}", self.speaking);
 
         if !self.dont_send {
-            self.config.dave_handshake.record(crate::DaveStage::HeartbeatSending, 0);
+            self.config
+                .dave_handshake
+                .record(crate::DaveStage::HeartbeatSending, 0);
             self.ws_client
                 .send_json(&GatewayEvent::from(Heartbeat { nonce }))
                 .await?;
-            self.config.dave_handshake.record(crate::DaveStage::HeartbeatSent, 0);
+            self.config
+                .dave_handshake
+                .record(crate::DaveStage::HeartbeatSent, 0);
         }
 
         Ok(())
@@ -315,7 +321,9 @@ impl AuxNetwork {
                     Some(_) => 2,
                     None => 0,
                 };
-                self.config.dave_handshake.record(crate::DaveStage::HeartbeatAck, outcome);
+                self.config
+                    .dave_handshake
+                    .record(crate::DaveStage::HeartbeatAck, outcome);
                 if outcome == 2 {
                     warn!("Voice heartbeat acknowledgement did not match the pending heartbeat");
                 }
@@ -562,7 +570,9 @@ impl AuxNetwork {
         }
 
         self.refresh_dave_ready();
-        self.config.dave_handshake.record(crate::DaveStage::VoiceEventHandled, handled_opcode);
+        self.config
+            .dave_handshake
+            .record(crate::DaveStage::VoiceEventHandled, handled_opcode);
         Ok(())
     }
 
@@ -682,7 +692,9 @@ impl AuxNetwork {
 
 impl Drop for AuxNetwork {
     fn drop(&mut self) {
-        self.config.dave_handshake.record(crate::DaveStage::VoiceLoopStopped, 0);
+        self.config
+            .dave_handshake
+            .record(crate::DaveStage::VoiceLoopStopped, 0);
         self.config.invalidate_dave();
     }
 }

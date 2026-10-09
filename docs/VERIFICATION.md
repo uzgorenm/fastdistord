@@ -1,3 +1,51 @@
+# Voice driver ownership and chat grouping, 2026-10-09
+
+The immediate `VoiceLoopStopped` after `ExternalSender` has a concrete local
+lifecycle cause. `AuxNetwork::drop` emits that marker when the object owning the
+voice WebSocket is destroyed. It is not a completed handshake phase, and replacing
+the socket within the same object does not emit it.
+
+After successful transport setup, `Transport::connect` cloned `pending.driver`
+and dropped the original guard. Disarming `PendingDriver::drop` did not suppress
+the driver's own destructor: Songbird's `Driver::drop` unconditionally sends
+`CoreMessage::Poison`, including when another clone survives. The core exits,
+poisons the mixer/event tasks, and drops its `Connection`. The connection and
+mixer own the two WebSocket command senders; dropping both makes
+`AuxNetwork::run` exit on `RecvError::Disconnected`, dropping the socket. This
+path emits no socket error. It also destroys the registered disconnect handler,
+leaving the application monitor to report a later MLS timeout, or to keep waiting
+while the authoritative roster says it is alone.
+
+The pending guard now stores an `Option<Driver>` and transfers the original
+owner with `take()`. Failed or cancelled setup retains ownership and still
+mutes, stops, leaves and drops the driver. The remaining monitor clone lives
+until intentional transport shutdown. Encryption readiness, mandatory DAVE,
+membership transitions, outgoing audio gates and native permissions are unchanged.
+
+An offline regression using the real Songbird core, mixer scheduler and event
+processor reproduced the old handoff destroying its registered event handler.
+It passed after the ownership fix: periodic events survive handoff, and final
+driver disposal releases the retained configuration. A second regression aborts
+a setup future and verifies that its handler and worker configuration are
+released. These tests open no network connection or audio device. They establish
+the local ownership failure and repair, not a successful live MLS exchange.
+
+The completed chat grouping changes are included: adjacent ordinary messages
+from the same author retain separate bodies with smaller gaps and one author
+header. Author changes, gaps over five minutes, UTC day changes, system events,
+replies and commands restart headers. Four grouping regressions passed. The
+UI worker supplied `dist/chat-review/chat.png` as a synthetic render; native
+interaction and real conversation rendering remain unverified.
+
+Combined validation passed: `cargo fmt --all -- --check`, strict all-target
+Clippy, 130 offline tests, six standalone DAVE policy tests and three standalone
+handshake-state tests. Four hardware/network tests remain ignored. The format
+check also corrected existing formatting in two vendored Songbird files without
+changing their behavior. The final local bundle's source identity and signature
+are verified separately after committing. The user must retest live voice:
+the receive loop should survive setup and handle later heartbeats and MLS events.
+No login, call, microphone capture, push, Actions, merge or release was performed.
+
 # Visual refresh and delayed peer diagnostics, 2026-10-09
 
 The visual refresh preserves Friends/Servers tabs, conversation ordering, expandable server channels, chat and current-call regions, and profile-adjacent voice/settings controls. Navigation now uses quiet selectable rows; neutral dark surfaces, shared soft corners, coordinated type sizes and larger spacing replace repeated boxes. Messages use existing profile portraits with fallback initials. Long headings reserve room for Call/Refresh, call metadata can wrap, and Settings remains scrollable. Authentication, persistence, account methods and media gates were not redesigned.

@@ -3,6 +3,7 @@
 //! Audio and account actions are dispatched to the backend; static public CDN images
 //! use a bounded worker. A password edit owns the only UI copy of the token.
 
+mod chat;
 mod images;
 mod sounds;
 use std::sync::{Arc, Mutex, mpsc::Sender};
@@ -1044,41 +1045,58 @@ impl VoiceApp {
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for message in &state.messages {
-                    if let Some(text) = crate::messaging::system_label(
-                        message,
-                        state.account.as_ref().map(|a| a.id),
-                    ) {
-                        ui.label(RichText::new(text).size(12.0).color(theme::SECONDARY));
-                    } else {
-                        ui.horizontal_top(|ui| {
-                            self.profile_avatar(
-                                ui,
-                                state,
-                                message.author_id,
-                                &message.author_name,
-                                false,
-                            );
-                            ui.vertical(|ui| {
-                                ui.set_width(ui.available_width());
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                ui.label(
-                                    RichText::new(&message.author_name)
-                                        .font(fastframe_fonts::Weight::SemiBold.font_id(13.0)),
-                                );
-                                ui.add(
-                                    egui::Label::new(if message.content.is_empty() {
-                                        "[Attachment or non-text message]"
-                                    } else {
-                                        &message.content
-                                    })
-                                    .wrap()
-                                    .selectable(true),
-                                );
-                            });
-                        });
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (index, message) in state.messages.iter().enumerate() {
+                    let previous = index.checked_sub(1).and_then(|i| state.messages.get(i));
+                    let continuation = chat::continues(previous, message);
+                    if index != 0 {
+                        ui.add_space(if continuation { 6.0 } else { 16.0 });
                     }
-                    ui.add_space(16.0);
+                    ui.push_id(message.id, |ui| {
+                        if let Some(text) = crate::messaging::system_label(
+                            message,
+                            state.account.as_ref().map(|a| a.id),
+                        ) {
+                            ui.label(RichText::new(text).size(12.0).color(theme::SECONDARY));
+                        } else {
+                            ui.horizontal_top(|ui| {
+                                if continuation {
+                                    ui.allocate_exact_size(
+                                        Vec2::new(32.0, 0.0),
+                                        egui::Sense::hover(),
+                                    );
+                                } else {
+                                    self.profile_avatar(
+                                        ui,
+                                        state,
+                                        message.author_id,
+                                        &message.author_name,
+                                        false,
+                                    );
+                                }
+                                ui.vertical(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.spacing_mut().item_spacing.y = 4.0;
+                                    if !continuation {
+                                        ui.label(
+                                            RichText::new(&message.author_name).font(
+                                                fastframe_fonts::Weight::SemiBold.font_id(13.0),
+                                            ),
+                                        );
+                                    }
+                                    ui.add(
+                                        egui::Label::new(if message.content.is_empty() {
+                                            "[Attachment or non-text message]"
+                                        } else {
+                                            &message.content
+                                        })
+                                        .wrap()
+                                        .selectable(true),
+                                    );
+                                });
+                            });
+                        }
+                    });
                 }
                 if state.messages.is_empty() && !state.chat_busy {
                     ui.label(RichText::new("No messages yet.").color(theme::SECONDARY));

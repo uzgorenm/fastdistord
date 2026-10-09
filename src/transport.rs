@@ -148,8 +148,7 @@ impl Transport {
             })
         });
         let mut pending = PendingDriver {
-            driver: Driver::new(voice_config),
-            armed: true,
+            driver: Some(Driver::new(voice_config)),
         };
         let transient_failure = Arc::new(AtomicBool::new(false));
         let status = DriverStatus {
@@ -158,7 +157,7 @@ impl Transport {
             events: events.clone(),
         };
         pending
-            .driver
+            .driver()
             .add_global_event(Event::Core(CoreEvent::DriverDisconnect), status);
 
         let playback = Arc::new(OnceLock::new());
@@ -176,10 +175,10 @@ impl Transport {
             CoreEvent::ClientDisconnect,
         ] {
             pending
-                .driver
+                .driver()
                 .add_global_event(Event::Core(event), receiver.clone());
         }
-        match timeout(HANDSHAKE_TIMEOUT, pending.driver.connect(connection)).await {
+        match timeout(HANDSHAKE_TIMEOUT, pending.driver().connect(connection)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 let reason = songbird::events::context_data::DisconnectReason::from(&error);
@@ -200,10 +199,7 @@ impl Transport {
         if gate.session() != expected_session {
             bail!("Voice connection was superseded");
         }
-        let driver = pending.driver.clone();
-        // Disarm the failure guard without creating a leaked Driver reference.
-        pending.armed = false;
-        drop(pending);
+        let driver = pending.into_driver();
         let mut transport = Self {
             driver,
             audio: audio_health,
@@ -307,15 +303,29 @@ impl Drop for Transport {
 
 // A cancelled/failed connection future must not leave background voice tasks connected.
 struct PendingDriver {
-    driver: Driver,
-    armed: bool,
+    driver: Option<Driver>,
+}
+impl PendingDriver {
+    fn driver(&mut self) -> &mut Driver {
+        self.driver
+            .as_mut()
+            .expect("pending driver is owned until handoff")
+    }
+
+    fn into_driver(mut self) -> Driver {
+        // Songbird poisons its core whenever ANY Driver clone is dropped.
+        // Move the owner out so dropping this guard cannot kill the new transport.
+        self.driver
+            .take()
+            .expect("pending driver is owned until handoff")
+    }
 }
 impl Drop for PendingDriver {
     fn drop(&mut self) {
-        if self.armed {
-            self.driver.mute(true);
-            self.driver.stop();
-            self.driver.leave();
+        if let Some(driver) = &mut self.driver {
+            driver.mute(true);
+            driver.stop();
+            driver.leave();
         }
     }
 }
@@ -710,6 +720,98 @@ fn checked_endpoint(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DriverPulse(UnboundedSender<()>);
+
+    #[async_trait]
+    impl EventHandler for DriverPulse {
+        async fn act(&self, _: &EventContext<'_>) -> Option<Event> {
+            let _ = self.0.send(());
+            None
+        }
+    }
+
+    fn pending_with_pulse() -> (
+        PendingDriver,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::Weak<()>,
+    ) {
+        // A private scheduler keeps this test independent of other tests' runtimes.
+        let scheduler = songbird::driver::Scheduler::default();
+        let mut config = Config::default().scheduler(scheduler);
+        let lifetime = Arc::new(());
+        let disposed = Arc::downgrade(&lifetime);
+        config.packet_gate = Some(Arc::new(move || {
+            let _keep_alive = &lifetime;
+            false
+        }));
+        let mut driver = Driver::new(config);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        driver.add_global_event(
+            Event::Periodic(Duration::from_millis(20), None),
+            DriverPulse(tx),
+        );
+        (
+            PendingDriver {
+                driver: Some(driver),
+            },
+            rx,
+            disposed,
+        )
+    }
+
+    async fn pulse(rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
+        assert_eq!(
+            timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("driver stopped ticking"),
+            Some(()),
+            "driver destroyed its registered event handler"
+        );
+    }
+
+    async fn driver_stopped(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+        disposed: &std::sync::Weak<()>,
+    ) {
+        timeout(Duration::from_secs(2), async {
+            while rx.recv().await.is_some() {}
+            while disposed.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("driver left background tasks running");
+    }
+
+    #[tokio::test]
+    async fn successful_pending_driver_handoff_preserves_running_tasks() {
+        let (pending, mut ticks, disposed) = pending_with_pulse();
+        pulse(&mut ticks).await;
+        let driver = pending.into_driver();
+        // The old clone/drop handoff poisons the core and destroys this handler.
+        // Several real scheduler ticks exercise the surviving core/mixer/event loop.
+        for _ in 0..3 {
+            pulse(&mut ticks).await;
+        }
+        assert!(disposed.upgrade().is_some());
+        drop(driver);
+        driver_stopped(&mut ticks, &disposed).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_driver_stops_running_tasks() {
+        let (pending, mut ticks, disposed) = pending_with_pulse();
+        pulse(&mut ticks).await;
+        let setup = tokio::spawn(async move {
+            let _pending = pending;
+            std::future::pending::<()>().await;
+        });
+        setup.abort();
+        assert!(setup.await.unwrap_err().is_cancelled());
+        driver_stopped(&mut ticks, &disposed).await;
+    }
+
     fn credentials() -> VoiceConnection {
         VoiceConnection {
             guild_id: Some(1),
