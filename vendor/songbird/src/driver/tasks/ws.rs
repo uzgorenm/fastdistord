@@ -107,6 +107,7 @@ impl AuxNetwork {
 
     #[instrument(skip(self))]
     async fn run(&mut self, interconnect: &mut Interconnect) {
+        self.config.dave_handshake.record(crate::DaveStage::VoiceLoopStarted, 0);
         let mut next_heartbeat = Instant::now() + self.heartbeat_interval;
 
         loop {
@@ -245,9 +246,11 @@ impl AuxNetwork {
         trace!("Sent heartbeat {:?}", self.speaking);
 
         if !self.dont_send {
+            self.config.dave_handshake.record(crate::DaveStage::HeartbeatSending, 0);
             self.ws_client
                 .send_json(&GatewayEvent::from(Heartbeat { nonce }))
                 .await?;
+            self.config.dave_handshake.record(crate::DaveStage::HeartbeatSent, 0);
         }
 
         Ok(())
@@ -258,6 +261,16 @@ impl AuxNetwork {
         interconnect: &Interconnect,
         value: GatewayEvent,
     ) -> Result<(), WsError> {
+        let handled_opcode = match &value {
+            GatewayEvent::HeartbeatAck(_) => 6,
+            GatewayEvent::ClientsConnect(_) => 11,
+            GatewayEvent::ClientDisconnect(_) => 13,
+            GatewayEvent::DaveMlsExternalSender(_) => 25,
+            GatewayEvent::DaveMlsProposals(_) => 27,
+            GatewayEvent::DaveMlsAnnounceCommitTransition(_) => 29,
+            GatewayEvent::DaveMlsWelcome(_) => 30,
+            _ => 0,
+        };
         match value {
             GatewayEvent::Speaking(ev) => {
                 #[cfg(feature = "receive")]
@@ -297,15 +310,14 @@ impl AuxNetwork {
                 );
             }
             GatewayEvent::HeartbeatAck(ev) => {
-                if let Some(nonce) = self.last_heartbeat_nonce.take() {
-                    if ev.nonce == nonce {
-                        trace!("Heartbeat ACK received.");
-                    } else {
-                        warn!(
-                            "Heartbeat nonce mismatch! Expected {}, saw {}.",
-                            nonce, ev.nonce
-                        );
-                    }
+                let outcome = match self.last_heartbeat_nonce.take() {
+                    Some(nonce) if ev.nonce == nonce => 1,
+                    Some(_) => 2,
+                    None => 0,
+                };
+                self.config.dave_handshake.record(crate::DaveStage::HeartbeatAck, outcome);
+                if outcome == 2 {
+                    warn!("Voice heartbeat acknowledgement did not match the pending heartbeat");
                 }
             }
             GatewayEvent::DavePrepareTransition(ev) => {
@@ -550,6 +562,7 @@ impl AuxNetwork {
         }
 
         self.refresh_dave_ready();
+        self.config.dave_handshake.record(crate::DaveStage::VoiceEventHandled, handled_opcode);
         Ok(())
     }
 
@@ -669,6 +682,7 @@ impl AuxNetwork {
 
 impl Drop for AuxNetwork {
     fn drop(&mut self) {
+        self.config.dave_handshake.record(crate::DaveStage::VoiceLoopStopped, 0);
         self.config.invalidate_dave();
     }
 }

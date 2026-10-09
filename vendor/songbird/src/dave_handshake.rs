@@ -4,6 +4,18 @@ use std::{collections::VecDeque, sync::Mutex, time::Instant};
 /// Locally defined handshake events; numeric values are versions, counts or transition IDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DaveStage {
+    /// Voice WebSocket task entered its receive/heartbeat loop.
+    VoiceLoopStarted,
+    /// Voice WebSocket task ended or was canceled; no reason payload retained.
+    VoiceLoopStopped,
+    /// Voice event handling and readiness refresh completed; recognized opcode or zero.
+    VoiceEventHandled,
+    /// Voice heartbeat send began; no nonce retained.
+    HeartbeatSending,
+    /// Voice heartbeat send completed; no nonce retained.
+    HeartbeatSent,
+    /// Heartbeat ACK: 0 unsolicited, 1 matched, 2 mismatched. No nonce retained.
+    HeartbeatAck,
     /// Secure WebSocket connected.
     Connected,
     /// Identify sent.

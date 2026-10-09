@@ -415,8 +415,7 @@ impl VoiceApp {
             if ui
                 .add_enabled(
                     !state.chat_sending,
-                    egui::Button::new("Friends")
-                        .selected(self.friends_open)
+                    egui::Button::selectable(self.friends_open, "Friends")
                         .min_size(Vec2::new(width, 34.0)),
                 )
                 .clicked()
@@ -431,8 +430,7 @@ impl VoiceApp {
             if ui
                 .add_enabled(
                     !state.chat_sending,
-                    egui::Button::new("Servers")
-                        .selected(!self.friends_open)
+                    egui::Button::selectable(!self.friends_open, "Servers")
                         .min_size(Vec2::new(width, 34.0)),
                 )
                 .clicked()
@@ -453,7 +451,7 @@ impl VoiceApp {
                 }
             }
         });
-        ui.add_space(10.0);
+        ui.add_space(18.0);
         egui::ScrollArea::vertical()
             .id_salt("sidebar_list")
             .auto_shrink([false, false])
@@ -480,9 +478,8 @@ impl VoiceApp {
                             if ui
                                 .add_enabled(
                                     !state.chat_sending && !state.social_busy,
-                                    egui::Button::new(&friend.name)
+                                    navigation_row(selected, &friend.name)
                                         .truncate()
-                                        .selected(selected)
                                         .min_size(Vec2::new(ui.available_width(), 36.0)),
                                 )
                                 .on_hover_text(&friend.name)
@@ -527,9 +524,8 @@ impl VoiceApp {
                             if ui
                                 .add_enabled(
                                     !state.chat_sending,
-                                    egui::Button::new(&dm.name)
+                                    navigation_row(state.selected_dm == Some(dm.id), &dm.name)
                                         .truncate()
-                                        .selected(state.selected_dm == Some(dm.id))
                                         .min_size(Vec2::new(ui.available_width(), 36.0)),
                                 )
                                 .on_hover_text(&dm.name)
@@ -564,9 +560,8 @@ impl VoiceApp {
                                 if ui
                                     .add_enabled(
                                         !state.chat_sending,
-                                        egui::Button::new(&guild.name)
+                                        navigation_row(selected, &guild.name)
                                             .truncate()
-                                            .selected(selected)
                                             .min_size(Vec2::new(ui.available_width(), 36.0)),
                                     )
                                     .on_hover_text(&guild.name)
@@ -592,17 +587,14 @@ impl VoiceApp {
                                         if ui
                                             .add_enabled(
                                                 !state.chat_sending,
-                                                egui::Button::new(format!("# {}", channel.name))
-                                                    .truncate()
-                                                    .selected(
-                                                        self.text_open
-                                                            && state.selected_text_channel
-                                                                == Some(channel.id),
-                                                    )
-                                                    .min_size(Vec2::new(
-                                                        ui.available_width(),
-                                                        32.0,
-                                                    )),
+                                                navigation_row(
+                                                    self.text_open
+                                                        && state.selected_text_channel
+                                                            == Some(channel.id),
+                                                    format!("# {}", channel.name),
+                                                )
+                                                .truncate()
+                                                .min_size(Vec2::new(ui.available_width(), 32.0)),
                                             )
                                             .on_hover_text(&channel.name)
                                             .clicked()
@@ -634,17 +626,14 @@ impl VoiceApp {
                                         if ui
                                             .add_enabled(
                                                 enabled,
-                                                egui::Button::new(label)
-                                                    .truncate()
-                                                    .selected(
-                                                        !self.text_open
-                                                            && self.browsing_channel
-                                                                == Some(channel.id),
-                                                    )
-                                                    .min_size(Vec2::new(
-                                                        ui.available_width(),
-                                                        32.0,
-                                                    )),
+                                                navigation_row(
+                                                    !self.text_open
+                                                        && self.browsing_channel
+                                                            == Some(channel.id),
+                                                    label,
+                                                )
+                                                .truncate()
+                                                .min_size(Vec2::new(ui.available_width(), 32.0)),
                                             )
                                             .on_hover_text(if active {
                                                 format!("{} · connected", channel.name)
@@ -901,9 +890,9 @@ impl VoiceApp {
                             .fill(if person.speaking {
                                 theme::SPEAKING_BG
                             } else {
-                                theme::SURFACE
+                                Color32::TRANSPARENT
                             })
-                            .corner_radius(8)
+                            .corner_radius(10)
                             .inner_margin(egui::Margin::symmetric(13, 10))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
@@ -1000,8 +989,13 @@ impl VoiceApp {
             {
                 self.profile_avatar(ui, state, person.id, &person.name, false);
             }
-            ui.add(egui::Label::new(RichText::new(&name).heading()).truncate())
-                .on_hover_text(&name);
+            ui.add_sized(
+                Vec2::new((ui.available_width() - 150.0).max(60.0), 34.0),
+                egui::Label::new(RichText::new(&name).heading())
+                    .halign(Align::Min)
+                    .truncate(),
+            )
+            .on_hover_text(&name);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add_enabled(!state.chat_busy, egui::Button::new("Refresh").small())
@@ -1035,7 +1029,7 @@ impl VoiceApp {
                 }
             });
         });
-        ui.separator();
+        ui.add_space(16.0);
         if state.chat_busy {
             ui.label(RichText::new("Loading messages…").color(theme::SECONDARY));
         } else if !state.chat_status.is_empty()
@@ -1057,24 +1051,40 @@ impl VoiceApp {
                     ) {
                         ui.label(RichText::new(text).size(12.0).color(theme::SECONDARY));
                     } else {
-                        ui.label(RichText::new(&message.author_name).strong());
-                        ui.add(
-                            egui::Label::new(if message.content.is_empty() {
-                                "[Attachment or non-text message]"
-                            } else {
-                                &message.content
-                            })
-                            .wrap()
-                            .selectable(true),
-                        );
+                        ui.horizontal_top(|ui| {
+                            self.profile_avatar(
+                                ui,
+                                state,
+                                message.author_id,
+                                &message.author_name,
+                                false,
+                            );
+                            ui.vertical(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 4.0;
+                                ui.label(
+                                    RichText::new(&message.author_name)
+                                        .font(fastframe_fonts::Weight::SemiBold.font_id(13.0)),
+                                );
+                                ui.add(
+                                    egui::Label::new(if message.content.is_empty() {
+                                        "[Attachment or non-text message]"
+                                    } else {
+                                        &message.content
+                                    })
+                                    .wrap()
+                                    .selectable(true),
+                                );
+                            });
+                        });
                     }
-                    ui.add_space(12.0);
+                    ui.add_space(16.0);
                 }
                 if state.messages.is_empty() && !state.chat_busy {
                     ui.label(RichText::new("No messages yet.").color(theme::SECONDARY));
                 }
             });
-        ui.separator();
+        ui.add_space(12.0);
         ui.add_enabled(
             !state.chat_sending,
             egui::TextEdit::multiline(&mut self.message_draft)
@@ -1135,7 +1145,7 @@ impl VoiceApp {
 
     fn controls(&mut self, ui: &mut egui::Ui, state: &UiState) {
         if let Some(call) = &state.current_call {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add(egui::Label::new(RichText::new(&call.target).strong()).truncate())
                     .on_hover_text(&call.target);
                 ui.label(
@@ -1175,7 +1185,7 @@ impl VoiceApp {
                 .size(11.0)
                 .color(theme::SECONDARY),
             );
-            ui.separator();
+            ui.add_space(12.0);
         }
         ui.horizontal_wrapped(|ui| {
             let active = has_voice_session(state.phase);
@@ -1295,13 +1305,13 @@ impl VoiceApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(430.0)
-            .default_pos(egui::pos2((ctx.content_rect().width() - 430.0).max(24.0) * 0.5, 24.0))
+            .default_width(460.0)
+            .default_pos(egui::pos2((ctx.content_rect().width() - 460.0).max(24.0) * 0.5, 24.0))
             .default_height((ctx.content_rect().height() - 100.0).clamp(320.0, 580.0))
             .max_height((ctx.content_rect().height() - 80.0).max(180.0))
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Audio devices").size(16.0).strong());
+                ui.label(RichText::new("Audio devices").font(fastframe_fonts::Weight::SemiBold.font_id(16.0)));
                 ui.add_space(9.0);
                 ui.label("Microphone");
                 device_picker(ui, "input_device", &mut self.selected_input, &state.input_devices);
@@ -1427,8 +1437,7 @@ impl VoiceApp {
                 .frame(
                     egui::Frame::new()
                         .fill(theme::PANEL)
-                        .inner_margin(egui::Margin::symmetric(16, 8))
-                        .stroke(Stroke::new(1.0, theme::BORDER)),
+                        .inner_margin(egui::Margin::symmetric(18, 12)),
                 )
                 .show(ui, |ui| self.controls(ui, &state));
             egui::Panel::left("navigation")
@@ -1437,7 +1446,7 @@ impl VoiceApp {
                 .frame(
                     egui::Frame::new()
                         .fill(theme::PANEL)
-                        .inner_margin(egui::Margin::same(12)),
+                        .inner_margin(egui::Margin::symmetric(14, 16)),
                 )
                 .show(ui, |ui| self.navigation(ui, &state));
         }
@@ -1445,7 +1454,7 @@ impl VoiceApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::BACKGROUND)
-                    .inner_margin(egui::Margin::symmetric(20, 16)),
+                    .inner_margin(egui::Margin::symmetric(26, 20)),
             )
             .show(ui, |ui| {
                 if let Some(error) = &self.local_error {
@@ -1630,6 +1639,10 @@ fn toggle_server(expanded: Option<u64>, clicked: u64) -> Option<u64> {
     }
 }
 
+fn navigation_row<'a>(selected: bool, label: impl egui::IntoAtoms<'a>) -> egui::Button<'a> {
+    egui::Button::selectable(selected, ()).left_text(label)
+}
+
 fn has_voice_session(phase: Phase) -> bool {
     matches!(
         phase,
@@ -1679,7 +1692,7 @@ fn meter_needs_repaint(
 fn section_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
-            .font(fastframe_fonts::Weight::SemiBold.font_id(10.0))
+            .font(fastframe_fonts::Weight::SemiBold.font_id(11.0))
             .color(theme::SECONDARY),
     );
 }
@@ -1766,8 +1779,9 @@ fn control_icon(
             .fill(if selected {
                 theme::DANGER.gamma_multiply(0.18)
             } else {
-                theme::SURFACE
-            }),
+                Color32::TRANSPARENT
+            })
+            .corner_radius(10),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     let center = response.rect.center();

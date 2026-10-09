@@ -748,7 +748,18 @@ fn json_receive_trace_retains_only_opcode_length_and_outcome() {
         )
         .is_err()
     );
+    assert!(songbird::decode_dave_json(r#"{"op":6,"d":1234567890123}"#, &trace).is_ok());
+    trace.record(songbird::DaveStage::VoiceLoopStarted, 0);
+    trace.record(songbird::DaveStage::HeartbeatSending, 0);
+    trace.record(songbird::DaveStage::HeartbeatSent, 0);
+    trace.record(songbird::DaveStage::HeartbeatAck, 1);
+    trace.record(songbird::DaveStage::VoiceEventHandled, 6);
+    trace.record(songbird::DaveStage::VoiceLoopStopped, 0);
     let exported = trace.trace();
+    assert!(!exported.contains("1234567890123"));
+    assert!(exported.contains("JsonDecoded 6"));
+    assert!(exported.contains("HeartbeatAck 1"));
+    assert!(exported.contains("VoiceLoopStopped 0"));
     assert!(exported.contains("JsonDecoded 11"));
     assert!(exported.contains("JsonDecodeFailed 999"));
     assert!(
