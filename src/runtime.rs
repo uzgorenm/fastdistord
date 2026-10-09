@@ -42,7 +42,6 @@ fn reset_chat(
     update(state, repaint, |s| {
         s.text_channels.clear();
         s.selected_dm = None;
-        s.social_busy = false;
         s.selected_text_channel = None;
         s.messages.clear();
         s.chat_busy = false;
@@ -71,6 +70,74 @@ enum ResultEvent {
     Messages(u64, u64, u64, Result<Vec<crate::messaging::ChatMessage>>),
     Sent(u64, u64, u64, Result<crate::messaging::ChatMessage>),
     Transport(u64, Result<Transport>),
+}
+
+// Friends/conversation discovery belongs to the account, not to the currently
+// selected chat. Navigating must not cancel or invalidate the startup snapshot.
+#[derive(Default)]
+struct SocialRequest {
+    generation: u64,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+impl SocialRequest {
+    fn cancel(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+
+    fn start(
+        &mut self,
+        state: &Shared,
+        repaint: &Repaint,
+        account_generation: u64,
+        tx: async_mpsc::Sender<ResultEvent>,
+        fetch: impl std::future::Future<
+            Output = (
+                Result<Vec<crate::social::Friend>>,
+                Result<crate::social::DirectChannelsSnapshot>,
+            ),
+        > + Send
+        + 'static,
+    ) {
+        self.cancel();
+        let request = self.generation;
+        update(state, repaint, |s| {
+            s.social_busy = true;
+            s.social_status = "Loading friends and conversations…".into();
+        });
+        self.task = Some(tokio::spawn(async move {
+            let (friends, channels) = fetch.await;
+            let _ = tx
+                .send(ResultEvent::Social(
+                    account_generation,
+                    request,
+                    friends,
+                    channels,
+                ))
+                .await;
+        }));
+    }
+}
+impl Drop for SocialRequest {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn select_dm_for_read(state: &mut UiState, channel: u64) -> bool {
+    if state.chat_sending || !state.direct_channels.iter().any(|c| c.id == channel) {
+        return false;
+    }
+    state.selected_guild = None;
+    state.text_channels.clear();
+    state.selected_dm = Some(channel);
+    state.selected_text_channel = Some(channel);
+    state.messages.clear();
+    state.chat_busy = true;
+    state.chat_status = "Loading messages…".into();
+    true
 }
 #[derive(Default)]
 struct PendingVoice {
@@ -214,6 +281,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
     let mut ring_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut chat_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut chat_generation = 0_u64;
+    let mut social_request = SocialRequest::default();
     let (results_tx, mut results) = async_mpsc::channel(8);
     let (voice_tx, mut voice_events) = async_mpsc::unbounded_channel();
     let mut meter_tick = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -309,6 +377,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         risk_accepted,
                         remember,
                     } => {
+                        social_request.cancel();
                         remembered_session = false;
                         update(&state, &repaint, |s| {
                             s.login_storage_status = if remember {
@@ -343,6 +412,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             s.friends.clear();
                             s.direct_channels.clear();
                             s.social_status.clear();
+                            s.social_busy = false;
                             s.selected_call_dm = None;
                             s.selected_call_guild = None;
                             s.selected_channel = None;
@@ -373,6 +443,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                         match crate::credential::load() {
                             Ok(token) => {
+                                social_request.cancel();
                                 reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                                 generation = generation.wrapping_add(1);
                                 join_generation = join_generation.wrapping_add(1);
@@ -399,6 +470,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 }));
                                 update(&state, &repaint, |s| {
                                     s.phase = Phase::Connecting;
+                                    s.social_busy = false;
                                     s.status = "Connecting with saved credential…".into();
                                 });
                             }
@@ -430,6 +502,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                     }
                     Command::Logout => {
+                        social_request.cancel();
                         reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                         let forgotten = crate::credential::sign_out();
                         remembered_session = false;
@@ -462,34 +535,25 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             };
                         });
                     }
-                    Command::SelectHome => {
-                        if snapshot(&state).chat_sending {
+                    Command::RefreshSocial => {
+                        let s = snapshot(&state);
+                        if s.chat_sending || s.chat_busy {
                             continue;
                         }
                         if let Some(c) = client.clone() {
-                            reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
-                            let (id, request, tx) =
-                                (generation, chat_generation, results_tx.clone());
-                            update(&state, &repaint, |s| {
-                                s.selected_guild = None;
-                                s.channels.clear();
-                                s.social_busy = true;
-                                s.social_status = "Loading friends and conversations…".into();
-                            });
-                            chat_task = Some(tokio::spawn(async move {
-                                let (friends, channels) =
-                                    tokio::join!(c.friends(), c.direct_channels());
-                                let _ = tx
-                                    .send(ResultEvent::Social(id, request, friends, channels))
-                                    .await;
-                            }));
+                            social_request.start(
+                                &state,
+                                &repaint,
+                                generation,
+                                results_tx.clone(),
+                                async move { tokio::join!(c.friends(), c.direct_channels()) },
+                            );
                         }
                     }
                     Command::OpenDm(user) => {
                         let s = snapshot(&state);
                         if s.chat_sending
                             || s.social_busy
-                            || s.selected_guild.is_some()
                             || !s.friends.iter().any(|f| f.id == user)
                         {
                             continue;
@@ -499,7 +563,8 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             let (id, request, tx) =
                                 (generation, chat_generation, results_tx.clone());
                             update(&state, &repaint, |s| {
-                                s.social_busy = true;
+                                s.selected_guild = None;
+                                s.chat_busy = true;
                                 s.social_status = "Opening conversation…".into();
                             });
                             chat_task = Some(tokio::spawn(async move {
@@ -509,28 +574,20 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         }
                     }
                     Command::SelectDm(channel) => {
-                        let s = snapshot(&state);
-                        if s.social_busy
-                            || s.chat_sending
-                            || s.selected_guild.is_some()
-                            || !s.direct_channels.iter().any(|c| c.id == channel)
-                        {
-                            continue;
-                        }
                         if let Some(c) = client.clone() {
+                            let mut selected = false;
+                            update(&state, &repaint, |s| {
+                                selected = select_dm_for_read(s, channel)
+                            });
+                            if !selected {
+                                continue;
+                            }
                             if let Some(task) = chat_task.take() {
                                 task.abort();
                             }
                             chat_generation = chat_generation.wrapping_add(1);
                             let (id, request, tx) =
                                 (generation, chat_generation, results_tx.clone());
-                            update(&state, &repaint, |s| {
-                                s.selected_dm = Some(channel);
-                                s.selected_text_channel = Some(channel);
-                                s.messages.clear();
-                                s.chat_busy = true;
-                                s.chat_status = "Loading messages…".into();
-                            });
                             chat_task = Some(tokio::spawn(async move {
                                 let result = c.messages(channel).await;
                                 let _ = tx
@@ -914,11 +971,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
             }
             Incoming::Result(event) => match event {
                 Some(ResultEvent::Social(id, request, friends, channels))
-                    if id == generation
-                        && request == chat_generation
-                        && snapshot(&state).selected_guild.is_none() =>
+                    if id == generation && request == social_request.generation =>
                 {
-                    chat_task.take();
+                    social_request.task.take();
                     update(&state, &repaint, |s| {
                         apply_social_snapshot(s, friends, channels)
                     });
@@ -933,7 +988,6 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         Ok(channel) => {
                             let channel_id = channel.id;
                             update(&state, &repaint, |s| {
-                                s.social_busy = false;
                                 s.social_status.clear();
                                 s.direct_channels.retain(|c| c.id != channel_id);
                                 for f in &channel.recipients {
@@ -963,7 +1017,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                             }
                         }
                         Err(error) => update(&state, &repaint, |s| {
-                            s.social_busy = false;
+                            s.chat_busy = false;
                             s.social_status = error.to_string();
                         }),
                     }
@@ -1108,8 +1162,9 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 });
                             }
                             signal_ready = false;
+                            let c = Arc::new(c);
                             gateway = Some(c.gateway());
-                            client = Some(Arc::new(c));
+                            client = Some(c.clone());
                             update(&state, &repaint, |s| {
                                 s.profiles.clear();
                                 s.profiles.insert(
@@ -1121,8 +1176,17 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                                 );
                                 s.account = Some(a);
                                 s.guilds = guilds;
+                                s.selected_guild = None;
+                                s.channels.clear();
                                 s.status = "Connecting Discord signaling…".into();
                             });
+                            social_request.start(
+                                &state,
+                                &repaint,
+                                generation,
+                                results_tx.clone(),
+                                async move { tokio::join!(c.friends(), c.direct_channels()) },
+                            );
                         }
                         Err(error) => {
                             let rejected = saved_login_rejected(from_saved, &error);
@@ -1288,6 +1352,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                     resume,
                 }) => {
                     if auth_rejected {
+                        social_request.cancel();
                         let removed = !remembered_session || crate::credential::sign_out().is_ok();
                         remembered_session = false;
                         client.take();
@@ -1296,6 +1361,7 @@ async fn run(state: Shared, mut commands: async_mpsc::Receiver<Command>, gate: A
                         reset_chat(&state, &repaint, &mut chat_generation, &mut chat_task);
                         update(&state, &repaint, |s| {
                             s.account = None;
+                            s.social_busy = false;
                             s.selected_channel = None;
                             s.selected_guild = None;
                             s.selected_call_dm = None;
@@ -2083,7 +2149,6 @@ fn apply_social_snapshot(
     match friends {
         Ok(friends) => state.friends = friends,
         Err(error) => {
-            state.friends.clear();
             notices.push(format!("Friends could not load: {error}"));
         }
     }
@@ -2098,7 +2163,6 @@ fn apply_social_snapshot(
             }
         }
         Err(error) => {
-            state.direct_channels.clear();
             notices.push(format!("Conversations could not load: {error}"));
         }
     }
@@ -2431,7 +2495,8 @@ mod tests {
                 skipped: 1,
             }),
         );
-        assert!(state.friends.is_empty());
+        assert_eq!(state.friends[0].id, 20);
+        assert!(state.social_status.contains("Friends could not load"));
         assert_eq!(state.direct_channels[0].id, 30);
         assert!(
             state
@@ -2701,6 +2766,144 @@ mod tests {
             assert_eq!(recovery.budget.attempts(), 1);
         }
     }
+    #[test]
+    fn selecting_a_known_dm_from_server_scope_preserves_the_active_call() {
+        let mut state = UiState {
+            selected_guild: Some(10),
+            selected_text_channel: Some(50),
+            selected_channel: Some(100),
+            selected_call_guild: Some(10),
+            social_busy: true,
+            muted: false,
+            direct_channels: vec![crate::social::DirectChannel {
+                id: 20,
+                name: "Known conversation".into(),
+                recipients: vec![crate::social::Friend {
+                    id: 2,
+                    name: "Friend".into(),
+                    avatar: None,
+                }],
+                last_message_id: None,
+            }],
+            ..Default::default()
+        };
+        assert!(!select_dm_for_read(&mut state, 999));
+        assert_eq!(state.selected_guild, Some(10));
+        assert!(select_dm_for_read(&mut state, 20));
+        assert_eq!(state.selected_guild, None);
+        assert_eq!(state.selected_dm, Some(20));
+        assert!(chat_channel_allowed(&state, 20));
+        assert!(!chat_channel_allowed(&state, 50));
+        assert_eq!(state.selected_channel, Some(100));
+        assert_eq!(state.selected_call_guild, Some(10));
+        assert!(!state.muted);
+        assert!(state.social_busy);
+        state.chat_sending = true;
+        assert!(!select_dm_for_read(&mut state, 20));
+    }
+
+    #[tokio::test]
+    async fn startup_social_fetch_survives_chat_navigation_and_refresh_failure() {
+        let state = Arc::new(Mutex::new(UiState::default()));
+        let mut social = SocialRequest::default();
+        let (tx, mut rx) = async_mpsc::channel(2);
+        let (finish, pending) = tokio::sync::oneshot::channel();
+        social.start(&state, &None, 7, tx, async move { pending.await.unwrap() });
+        let mut chat_generation = 4;
+        let mut chat_task = Some(tokio::spawn(std::future::pending::<()>()));
+        reset_chat(&state, &None, &mut chat_generation, &mut chat_task);
+        update(&state, &None, |s| s.selected_guild = Some(10));
+        assert!(
+            snapshot(&state).social_busy,
+            "chat navigation ended account discovery"
+        );
+        let friend = crate::social::Friend {
+            id: 2,
+            name: "Friend".into(),
+            avatar: None,
+        };
+        let channel = crate::social::DirectChannel {
+            id: 20,
+            name: "Conversation".into(),
+            recipients: vec![friend.clone()],
+            last_message_id: None,
+        };
+        assert!(
+            finish
+                .send((
+                    Ok(vec![friend.clone()]),
+                    Ok(crate::social::DirectChannelsSnapshot {
+                        channels: vec![channel.clone()],
+                        skipped: 0
+                    })
+                ))
+                .is_ok()
+        );
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ResultEvent::Social(account, request, friends, channels) = event else {
+            panic!("expected account social result");
+        };
+        assert_eq!(account, 7);
+        assert_eq!(request, social.generation);
+        update(&state, &None, |s| {
+            apply_social_snapshot(s, friends, channels)
+        });
+        let mut state = snapshot(&state);
+        assert_eq!(state.selected_guild, Some(10));
+        assert_eq!(state.friends.as_slice(), std::slice::from_ref(&friend));
+        assert_eq!(
+            state.direct_channels.as_slice(),
+            std::slice::from_ref(&channel)
+        );
+        assert!(!state.social_busy);
+        apply_social_snapshot(
+            &mut state,
+            Err(anyhow::anyhow!("temporary failure")),
+            Err(anyhow::anyhow!("temporary failure")),
+        );
+        assert_eq!(state.friends, [friend]);
+        assert_eq!(state.direct_channels, [channel]);
+        assert!(state.social_status.contains("could not load"));
+    }
+
+    #[tokio::test]
+    async fn social_refresh_and_account_cancellation_retire_old_requests() {
+        let state = Arc::new(Mutex::new(UiState::default()));
+        let mut social = SocialRequest::default();
+        let (tx, mut rx) = async_mpsc::channel(2);
+        let (old_sender, old_receiver) = tokio::sync::oneshot::channel();
+        social.start(&state, &None, 7, tx.clone(), async move {
+            old_receiver.await.unwrap()
+        });
+        let old_request = social.generation;
+        social.start(&state, &None, 7, tx, async {
+            (
+                Ok(vec![]),
+                Ok(crate::social::DirectChannelsSnapshot {
+                    channels: vec![],
+                    skipped: 0,
+                }),
+            )
+        });
+        tokio::task::yield_now().await;
+        assert!(old_sender.is_closed());
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ResultEvent::Social(_, request, _, _) = event else {
+            panic!("expected social result");
+        };
+        assert_ne!(request, old_request);
+        assert_eq!(request, social.generation);
+        social.cancel();
+        assert_ne!(request, social.generation);
+        assert!(social.task.is_none());
+    }
+
     // Account/channel changes must release pending history and erase displayed
     // text, without changing the independent call's microphone controls.
     #[tokio::test]

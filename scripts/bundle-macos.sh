@@ -17,7 +17,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/fastdistord"
 [ -f dist/third-party/NOTICE_COLLECTION_COMPLETE ] || python3 scripts/collect-notices.py
 cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
-cp -R dist/third-party "$APP/Contents/Resources/third-party"
+mkdir -p "$APP/Contents/Resources/third-party"
+cp -R dist/third-party/. "$APP/Contents/Resources/third-party/"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

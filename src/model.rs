@@ -159,7 +159,7 @@ pub enum Command {
     },
     Logout,
     Reconnect,
-    SelectHome,
+    RefreshSocial,
     OpenDm(u64),
     SelectDm(u64),
     CallDm(u64),

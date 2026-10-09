@@ -1,3 +1,36 @@
+# Capture read-ahead and social navigation, 2026-10-09
+
+A continuous synthetic microphone fixture exposed a read-ahead defect in the
+production InputReader → RawAdapter → Symphonia PCM path. Feeding exactly 20 ms
+of capture before each decoder packet failed at packet 18: Symphonia's ring-wrap
+made a partial read, then InputReader allowed another full 10 ms read. That
+crossed into uncaptured audio and buffered zeros for later playback. Reads now
+finish the current logical 10 ms block before proceeding. The same fixture passes
+200 consecutive packets, spanning repeated ring wraps. Gate epochs, mute/PTT,
+underflow silence and nonblocking decoding remain intact. This is an offline
+corruption fix, not a measurement of live microphone quality.
+
+Two independent navigation defects were also identified. Friends/Servers changes
+only the displayed sidebar, but SelectDm/OpenDm rejected a known friend while a
+server remained selected. An explicit friend selection now changes chat scope
+without changing call ownership or mute. Friends/DM discovery also shared a task
+and generation with chat reads, so navigation could cancel or invalidate its
+result. Account connection now owns the initial social fetch; refresh has its own
+cancellation generation and preserves the current draft. Failed refreshes retain
+loaded contacts while displaying the error. Restoring the old DM guard and
+chat-reset behavior makes the focused regressions fail. Tests also cover request
+cancellation and the Friends → Refresh → DM → Call command sequence without any
+network call. The user's restart report was withdrawn; these code defects are
+not claimed to explain that report. Authentication and credential storage are
+unchanged.
+
+Repeated macOS bundling now copies third-party notice contents into the existing
+resource directory instead of nesting another third-party directory.
+
+Formatting, strict all-target Clippy, all 141 offline tests and nine standalone
+DAVE policy/handshake tests passed. Four hardware/network tests remain ignored.
+No live microphone, call, QR approval or credential access was automated.
+
 # Composer spacing, 2026-10-09
 
 Short conversation histories now shrink to their content instead of reserving

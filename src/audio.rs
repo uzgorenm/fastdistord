@@ -627,7 +627,7 @@ struct ReaderShared {
 }
 
 /// A nonblocking, non-seekable 48 kHz mono f32-LE stream for Songbird RawAdapter.
-/// Reads return at most 10 ms; underflow becomes silence. Songbird's mixer clock
+/// Reads stop at each 10 ms boundary; underflow becomes silence. Songbird's mixer clock
 /// paces consumption. Sleeping here would block its synchronous packet decoder.
 /// This does not retract samples already buffered inside Songbird: the transport
 /// must gate outgoing packets and recreate its source on gate epoch changes.
@@ -647,7 +647,12 @@ impl Read for InputReader {
         if self.inner.shared.stopped.load(Ordering::Acquire) {
             return Ok(0);
         }
-        let count = output.len().min(BLOCK_FRAMES * 4);
+        // A decoder ring-wrap can request only part of a capture block. Finish
+        // that block on the next read instead of letting read-ahead cross into
+        // the next capture period and permanently buffer its missing audio as zeros.
+        let block_bytes = BLOCK_FRAMES * size_of::<f32>();
+        let remaining = block_bytes - (self.position % block_bytes as u64) as usize;
+        let count = output.len().min(remaining);
         let snapshot = self.inner.shared.gate.snapshot();
         let mut consumer = self
             .inner
@@ -1286,6 +1291,42 @@ mod tests {
             960
         );
         assert!(received.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn continuous_microphone_packets_do_not_prefetch_future_silence() {
+        use songbird::input::{AudioStream, LiveInput, RawAdapter, codecs};
+        use symphonia_core::audio::{AudioBufferRef, Signal};
+
+        let (mut producer, reader, gate) = reader_fixture();
+        let mut input = LiveInput::Raw(AudioStream {
+            input: Box::new(RawAdapter::new(reader, 48_000, 1)),
+        })
+        .promote(codecs::get_codec_registry(), codecs::get_probe())
+        .unwrap();
+        let parsed = input.parsed_mut().unwrap();
+        // Feed precisely one 20 ms capture period before each mixer read. This
+        // crosses Symphonia's ring boundary repeatedly without a device or clock.
+        for frame in 0..200 {
+            let value = 0.25 + (frame % 4) as f32 * 0.125;
+            for _ in 0..960 {
+                producer
+                    .push(CaptureSample {
+                        sample: value,
+                        epoch: gate.epoch(),
+                    })
+                    .unwrap();
+            }
+            let packet = parsed.format.next_packet().unwrap();
+            let AudioBufferRef::F32(decoded) = parsed.decoder.decode(&packet).unwrap() else {
+                panic!("microphone must decode to f32");
+            };
+            assert_eq!(decoded.frames(), 960);
+            assert!(
+                decoded.chan(0).iter().all(|s| *s == value),
+                "capture frame {frame} contains stale samples or synthesized silence"
+            );
+        }
     }
 
     #[test]

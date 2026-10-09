@@ -8,9 +8,9 @@ The sign-in screen offers fresh QR login with mobile approval or macOS Keychain 
 
 ## Download and install
 
-Version **0.01** is being verified and has not been published as a GitHub Release yet. Hosted download links will be added after the actual packages are available. For now, [build from source](#build-from-source).
+See [GitHub Releases](https://github.com/uzgorenm/fastdistord/releases) for available downloads. Only assets attached to a release are published packages. Repository access is required while the project is private.
 
-Packages: Mac Apple Silicon DMG, Windows x64 EXE installer, and a Linux amd64 Debian package for Ubuntu 24.04 or compatible systems. Mac/Windows packages are not notarized/vendor-signed.
+The native package for version **0.01** targets macOS 13 or later on Apple Silicon. It has a local ad-hoc signature and is not notarized. Windows and Linux downloads are not available for this release; [build from source](#build-from-source) on those platforms.
 
 ## Features
 

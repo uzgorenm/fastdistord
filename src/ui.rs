@@ -118,7 +118,6 @@ struct VoiceApp {
     local_error: Option<String>,
     text_open: bool,
     friends_open: bool,
-    home_requested: bool,
     last_server: Option<u64>,
     expanded_server: Option<u64>,
     server_sections: HashMap<u64, ServerSection>,
@@ -194,7 +193,6 @@ impl VoiceApp {
             local_error: None,
             text_open: true,
             friends_open: true,
-            home_requested: false,
             last_server: None,
             expanded_server: None,
             server_sections: HashMap::new(),
@@ -235,7 +233,6 @@ impl VoiceApp {
             self.images.suspend();
             self.qr_login = None;
             self.qr_code = None;
-            self.home_requested = false;
             self.last_server = None;
             self.expanded_server = None;
             self.server_sections.clear();
@@ -247,7 +244,6 @@ impl VoiceApp {
             &command,
             Command::SelectGuild(_)
                 | Command::SelectTextChannel(_)
-                | Command::SelectHome
                 | Command::SelectDm(_)
                 | Command::OpenDm(_)
                 | Command::Logout
@@ -432,6 +428,15 @@ impl VoiceApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.friends_open {
+                    if ui
+                        .add_enabled(
+                            !state.social_busy && !state.chat_busy && !state.chat_sending,
+                            egui::Button::new("Refresh friends").small(),
+                        )
+                        .clicked()
+                    {
+                        self.send(Command::RefreshSocial);
+                    }
                     if state.social_busy {
                         ui.label(RichText::new("Loading…").color(theme::SECONDARY));
                     }
@@ -452,7 +457,7 @@ impl VoiceApp {
                             self.profile_avatar(ui, state, friend.id, &friend.name, false);
                             if ui
                                 .add_enabled(
-                                    !state.chat_sending && !state.social_busy,
+                                    !state.chat_sending && (dm.is_some() || !state.social_busy),
                                     navigation_row(selected, &friend.name)
                                         .truncate()
                                         .min_size(Vec2::new(ui.available_width(), 36.0)),
@@ -1472,10 +1477,6 @@ impl VoiceApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let state = self.snapshot();
         let ctx = ui.ctx().clone();
-        if state.account.is_some() && !self.home_requested {
-            self.home_requested = true;
-            self.send(Command::SelectHome);
-        }
         if self.friends_open
             && let Some(dm) = state.selected_dm
         {
@@ -2097,7 +2098,6 @@ mod tests {
             local_error: None,
             text_open: true,
             friends_open: true,
-            home_requested: false,
             last_server: None,
             expanded_server: None,
             server_sections: HashMap::new(),
@@ -2218,7 +2218,6 @@ mod tests {
             ..Default::default()
         };
         let (mut app, rx) = fixture(state);
-        app.home_requested = true;
         app.draft_channel = Some(50);
         app.message_draft = "Unsent draft".into();
         app.expanded_server = Some(10);
@@ -2270,7 +2269,6 @@ mod tests {
             ..Default::default()
         };
         let (mut app, rx) = fixture(state);
-        app.home_requested = true;
         app.draft_channel = Some(50);
         app.message_draft = "Safe synthetic message".into();
         let ctx = egui::Context::default();
@@ -2296,6 +2294,58 @@ mod tests {
             "Connected for this launch, but Remember me was not enabled: failure"
         ));
         assert!(storage_notice("Unknown storage status"));
+    }
+
+    #[test]
+    fn friends_refresh_and_explicit_dm_click_work_after_server_browsing() {
+        let friend = crate::social::Friend {
+            id: 2,
+            name: "Restart friend".into(),
+            avatar: None,
+        };
+        let state = UiState {
+            account: Some(crate::model::Account {
+                id: 1,
+                name: "Demo".into(),
+                avatar: None,
+            }),
+            phase: Phase::SignalingReady,
+            selected_guild: Some(10),
+            selected_text_channel: Some(50),
+            friends: vec![friend.clone()],
+            direct_channels: vec![crate::social::DirectChannel {
+                id: 20,
+                name: "Private conversation".into(),
+                recipients: vec![friend],
+                last_message_id: None,
+            }],
+            ..Default::default()
+        };
+        let (mut app, rx) = fixture(state);
+        app.friends_open = false;
+        app.draft_channel = Some(50);
+        app.message_draft = "Preserve until a conversation is selected".into();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        click_label(&mut app, &ctx, "Friends");
+        assert!(rx.try_recv().is_err());
+        click_label(&mut app, &ctx, "Refresh friends");
+        assert!(matches!(rx.try_recv(), Ok(Command::RefreshSocial)));
+        assert!(!app.message_draft.is_empty());
+        assert_eq!(app.snapshot().selected_guild, Some(10));
+        click_label(&mut app, &ctx, "Restart friend");
+        assert!(matches!(rx.try_recv(), Ok(Command::SelectDm(20))));
+        assert!(app.message_draft.is_empty());
+        // Apply the coordinator's completed selection without network or login.
+        {
+            let mut s = app.state.lock().unwrap();
+            s.selected_guild = None;
+            s.selected_dm = Some(20);
+            s.selected_text_channel = Some(20);
+        }
+        click_label(&mut app, &ctx, "Call");
+        assert!(matches!(rx.try_recv(), Ok(Command::CallDm(20))));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
