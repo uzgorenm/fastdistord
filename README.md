@@ -2,13 +2,13 @@
 
 Discord voice and text in a small native Rust app. Starts muted.
 
-[Download 0.01 for Apple Silicon Macs](https://github.com/uzgorenm/fastdistord/releases/download/v0.01/Fastdistord-0.01-macos-arm64.dmg) · [Release notes and checksums](https://github.com/uzgorenm/fastdistord/releases/tag/v0.01)
+[Mac Apple Silicon 0.02](https://github.com/uzgorenm/fastdistord/releases/download/v0.02/Fastdistord-0.02-macos-arm64.dmg) · [Windows x64 0.02](https://github.com/uzgorenm/fastdistord/releases/download/v0.02/Fastdistord-0.02-windows-x64-setup.exe) · [Release notes and checksums](https://github.com/uzgorenm/fastdistord/releases/tag/v0.02)
 
-Requires macOS 13 or later. Ad-hoc signed, not notarized. Private repository access required. Windows and Linux downloads are not available yet.
+Mac requires macOS 13 or later; ad-hoc signed, not notarized. The Windows installer is unsigned and cross-compiled; Windows runtime testing is pending. Private repository access required. Linux downloads are not included.
 
 ## Use
 
-1. Open the DMG, drag Fastdistord into Applications, then open it.
+1. On Mac, open the DMG, drag Fastdistord into Applications, then open it. On Windows, run the installer and open Fastdistord from Start.
 2. Choose **Connect with QR code**, scan with Discord on your phone, and approve only a login you started. Optional **Remember me** saves access in macOS Keychain.
 3. Choose a friend to chat or **Call**. For servers, select a server, then **Chat** or **Voice → Join · channel**. Allow microphone access, wait for encrypted voice readiness, then unmute.
 

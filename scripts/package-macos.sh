@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-VERSION=0.01
+VERSION=0.02
 APP=dist/latest/Fastdistord.app
 [ -d "$APP" ] || { echo 'Build the Mac bundle first.' >&2; exit 1; }
-[ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" = 0.0.1 ]
+[ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" = 0.0.2 ]
 codesign --verify --deep --strict "$APP"
 "$APP/Contents/MacOS/fastdistord" --version | grep -Fx "fastdistord $VERSION"
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/fastdistord-dmg.XXXXXX")
