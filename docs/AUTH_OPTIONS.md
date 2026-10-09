@@ -24,4 +24,4 @@ Offline crypto, timing and protocol-order fixtures are tested. A network probe u
 
 ## Local devices
 
-OS microphone/camera/screen permission only authorizes local capture. It cannot grant Discord voice, video or message access. Version 0.01 includes QR login, optional existing local credential entry and explicit Keychain reconnect. It does not present OAuth as channel access or extract installed-app/browser credentials.
+OS microphone/camera/screen permission only authorizes local capture. It cannot grant Discord voice, video or message access. Version 0.02 includes QR login, optional existing local credential entry and explicit Keychain reconnect. It does not present OAuth as channel access or extract installed-app/browser credentials.

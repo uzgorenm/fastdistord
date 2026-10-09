@@ -1,6 +1,6 @@
 # Media implementation status
 
-Version 0.01 exposes voice and text only. Standalone camera/window previews and codec diagnostics have been removed from the production UI. The capture/codec/DAVE/RTP implementations and automated/headless checks remain available to develop real call media. No preview is presented as a successful Discord video or screen-share session.
+Version 0.02 exposes voice and text only. Standalone camera/window previews and codec diagnostics have been removed from the production UI. The capture/codec/DAVE/RTP implementations and automated/headless checks remain available to develop real call media. No preview is presented as a successful Discord video or screen-share session.
 
 Capture adapters retain at most one bounded BGRA frame and do not record media. Physical capture remains untested. League interactions and overlay work are stopped.
 

@@ -1,14 +1,14 @@
 Unicode true
 !include "MUI2.nsh"
-Name "Fastdistord 0.01"
-OutFile "..\..\dist\Fastdistord-0.01-windows-x64-setup.exe"
+Name "Fastdistord 0.02"
+OutFile "..\..\dist\Fastdistord-0.02-windows-x64-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\Fastdistord"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
-VIProductVersion "0.0.1.0"
+VIProductVersion "0.0.2.0"
 VIAddVersionKey "ProductName" "Fastdistord"
-VIAddVersionKey "ProductVersion" "0.01"
-VIAddVersionKey "FileVersion" "0.0.1.0"
+VIAddVersionKey "ProductVersion" "0.02"
+VIAddVersionKey "FileVersion" "0.0.2.0"
 VIAddVersionKey "FileDescription" "Fastdistord installer"
 VIAddVersionKey "LegalCopyright" "MIT licensed"
 !insertmacro MUI_PAGE_LICENSE "..\..\LICENSE"
@@ -30,7 +30,7 @@ Section "Fastdistord"
   CreateShortcut "$SMPROGRAMS\Fastdistord\Fastdistord.lnk" "$INSTDIR\fastdistord.exe"
   CreateShortcut "$SMPROGRAMS\Fastdistord\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Fastdistord" "DisplayName" "Fastdistord"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Fastdistord" "DisplayVersion" "0.01"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Fastdistord" "DisplayVersion" "0.02"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Fastdistord" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Fastdistord" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Fastdistord" "NoRepair" 1

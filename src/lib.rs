@@ -4,4 +4,4 @@ pub mod media;
 pub mod video;
 
 /// User-facing release label; Cargo uses its corresponding SemVer.
-pub const RELEASE_VERSION: &str = "0.01";
+pub const RELEASE_VERSION: &str = "0.02";
