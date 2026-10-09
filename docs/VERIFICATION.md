@@ -1,3 +1,297 @@
+# Capture read-ahead and social navigation, 2026-10-09
+
+A continuous synthetic microphone fixture exposed a read-ahead defect in the
+production InputReader → RawAdapter → Symphonia PCM path. Feeding exactly 20 ms
+of capture before each decoder packet failed at packet 18: Symphonia's ring-wrap
+made a partial read, then InputReader allowed another full 10 ms read. That
+crossed into uncaptured audio and buffered zeros for later playback. Reads now
+finish the current logical 10 ms block before proceeding. The same fixture passes
+200 consecutive packets, spanning repeated ring wraps. Gate epochs, mute/PTT,
+underflow silence and nonblocking decoding remain intact. This is an offline
+corruption fix, not a measurement of live microphone quality.
+
+Two independent navigation defects were also identified. Friends/Servers changes
+only the displayed sidebar, but SelectDm/OpenDm rejected a known friend while a
+server remained selected. An explicit friend selection now changes chat scope
+without changing call ownership or mute. Friends/DM discovery also shared a task
+and generation with chat reads, so navigation could cancel or invalidate its
+result. Account connection now owns the initial social fetch; refresh has its own
+cancellation generation and preserves the current draft. Failed refreshes retain
+loaded contacts while displaying the error. Restoring the old DM guard and
+chat-reset behavior makes the focused regressions fail. Tests also cover request
+cancellation and the Friends → Refresh → DM → Call command sequence without any
+network call. The user's restart report was withdrawn; these code defects are
+not claimed to explain that report. Authentication and credential storage are
+unchanged.
+
+Repeated macOS bundling now copies third-party notice contents into the existing
+resource directory instead of nesting another third-party directory.
+
+Formatting, strict all-target Clippy, all 141 offline tests and nine standalone
+DAVE policy/handshake tests passed. Four hardware/network tests remain ignored.
+No live microphone, call, QR approval or credential access was automated.
+
+# Composer spacing, 2026-10-09
+
+Short conversation histories now shrink to their content instead of reserving
+the entire available viewport above the composer. The explicit gap falls from
+12 to 4 pixels, and the height budget uses the actual layout spacing instead of
+a fixed 36-pixel allowance. Overflow scrolling, bottom sticking, multiline input,
+draft preservation, message grouping and footer controls remain in place.
+
+Synthetic headless renders were checked at normal and narrow widths, with long
+names, multiline input and an active-call layout. Formatting, strict Clippy,
+all 136 offline tests and the nine standalone DAVE checks passed. No native app
+interaction, microphone or live call was automated for this change.
+
+# Received DAVE payload bounds, 2026-10-09
+
+The user confirmed that the other participant could hear them on build
+`d22b480`, but they could not hear the peer. This confirms outgoing audibility
+for that call only. The peer's speaking-indicator state is unknown.
+
+The production receive path lost the exact Opus bounds at its jitter-buffer
+handoff. `UdpRx::process_udp_message` authenticates transport encryption, strips
+RTP extensions/padding, then DAVE-decrypts the media in place. DAVE decryption
+correctly increases the trailing-byte count as the frame shrinks. `StoredPacket`
+previously retained only the packet and a decrypted flag. `SsrcState` then
+recomputed the range using only the transport suffix length, so leftover DAVE
+frame bytes reached libopus. It also reported an end index in `RtpData`'s
+trailing-byte-count field. The receive decoder uses libopus directly and is
+independent of the outgoing Symphonia PCM codec.
+
+The buffer now retains the authenticated media offset and trailing-byte count;
+playout decodes exactly that slice and exposes matching `RtpData` bounds. Failed
+transport authentication and invalid RTP padding/bounds are rejected before
+buffering. Outgoing audio, required encryption, membership transitions and the
+application's mute/deafen/PTT gates are unchanged.
+
+A socket-free harness calls the actual production UDP packet processor and
+playout decoder. The focused regression uses a real two-member offline MLS group,
+synthetic Opus, transport AEAD and the production jitter buffer. Before the fix,
+it failed with `buffered decode differs from exact Opus: Aes256Gcm,
+extension=false, padding=0`. Afterward all eight combinations of AES-GCM or
+XChaCha20-Poly1305, RTP extension presence and RTP padding return exact Opus bytes
+and PCM identical to a fresh reference libopus decoder. Replay, transport/DAVE
+tampering, plaintext, unknown/wrong senders, unready encryption, invalid padding
+and truncation are rejected. No keys, packets or audio are logged; test samples
+are generated locally. The development-only harness feature preserves production
+scheduling and is absent from the normal release dependency.
+
+All 136 offline tests passed against the combined voice/UI tree; four
+hardware/network tests remain ignored.
+Formatting, strict all-target Clippy and the six standalone DAVE policy plus
+three handshake tests passed.
+The full run includes speaker mixing, output gating/volume/downmix, resampling,
+synthetic duplex processing, microphone codec and driver lifetime regressions.
+These checks reproduce and repair a receive corruption defect; they do not
+establish that this was the only cause of the user's silent call or verify
+physical playback. The final bundle's source identity and signature are checked
+after the local commit and recorded beside `dist/latest/Fastdistord.app`.
+
+The combined UI removes the top branding/success banner, retains storage failure
+messages, compacts the call footer, and places a bounded multiline composer and
+Send button on one row. Servers opens with its groups collapsed; each expanded
+server has Chat/Voice filters that preserve the conversation, call and draft.
+Existing message grouping remains intact. Aggregate tests include navigation,
+filter and draft preservation, pending-send protection, and storage-error
+visibility. No native app launch or live call was automated for verification.
+
+# Outgoing microphone PCM decoder, 2026-10-09
+
+The user reports that build `15a199e` connects and shows a moving microphone
+meter, but the other participant cannot hear them. The meter checks the current
+mute/deafen, server suppression, confirmed remote mute, PTT and encryption gates.
+It measures the gated input callback before the resampling worker, microphone
+reader, Songbird decoder, Opus encoder and encrypted packet send. Its movement
+does not establish that a playable microphone track exists.
+
+The normal dependency graph did not contain a PCM decoder. Songbird disables
+Symphonia's default features; the application depended only on `symphonia-core`.
+`RawAdapter` supplies a header for 48 kHz mono little-endian f32 samples, and
+Songbird's `RawReader` selects `CODEC_TYPE_PCM_F32LE`. The production codec
+registry could not instantiate that codec. `LiveInput::promote` returned
+`DecodeError("no compatible track found")`; Songbird then removed the errored
+track while capture and the meter continued. Track-handle disposal does not
+poison the driver, and no additional clone/drop cause was found on this path.
+
+The application now explicitly enables the PCM feature of the existing
+Symphonia 0.5.5 dependency. The lockfile adds only `symphonia-codec-pcm` 0.5.5.
+Microphone source preparation is awaited with a bounded timeout before track
+attachment and arming. Preparation errors produce a static, non-retryable
+disconnect message and close audio. After preparation yields, the monitor
+rechecks session ownership, liveness, DAVE readiness, capture epoch and transmit
+authority. Muting, PTT, membership transitions, speaking signaling, Opus/DAVE
+and transport encryption policies remain unchanged.
+
+The focused regression feeds synthetic samples into the actual `InputReader`
+and `RawAdapter`, using the production registry. It failed with the missing-codec
+error before the feature change. It now verifies the decoded samples, 48 kHz
+mono format, real non-silent Opus encoding, and a nonzero decoded round trip.
+No hardware, audio recording, credentials or network call is used by this test.
+
+Formatting, strict all-target Clippy and 131 offline tests passed; four
+hardware/network tests remain ignored. Existing mute/PTT, rate conversion,
+driver lifetime, DAVE authentication/membership and stale-packet regressions
+passed in that run. The dependency notice inventory was regenerated with the
+PCM codec included. The final bundle's commit and signature are checked after
+the local commit. Audible delivery through a live Discord call remains a user
+test; this result proves the local codec defect and its repair, not peer receipt.
+
+# Voice driver ownership and chat grouping, 2026-10-09
+
+The immediate `VoiceLoopStopped` after `ExternalSender` has a concrete local
+lifecycle cause. `AuxNetwork::drop` emits that marker when the object owning the
+voice WebSocket is destroyed. It is not a completed handshake phase, and replacing
+the socket within the same object does not emit it.
+
+After successful transport setup, `Transport::connect` cloned `pending.driver`
+and dropped the original guard. Disarming `PendingDriver::drop` did not suppress
+the driver's own destructor: Songbird's `Driver::drop` unconditionally sends
+`CoreMessage::Poison`, including when another clone survives. The core exits,
+poisons the mixer/event tasks, and drops its `Connection`. The connection and
+mixer own the two WebSocket command senders; dropping both makes
+`AuxNetwork::run` exit on `RecvError::Disconnected`, dropping the socket. This
+path emits no socket error. It also destroys the registered disconnect handler,
+leaving the application monitor to report a later MLS timeout, or to keep waiting
+while the authoritative roster says it is alone.
+
+The pending guard now stores an `Option<Driver>` and transfers the original
+owner with `take()`. Failed or cancelled setup retains ownership and still
+mutes, stops, leaves and drops the driver. The remaining monitor clone lives
+until intentional transport shutdown. Encryption readiness, mandatory DAVE,
+membership transitions, outgoing audio gates and native permissions are unchanged.
+
+An offline regression using the real Songbird core, mixer scheduler and event
+processor reproduced the old handoff destroying its registered event handler.
+It passed after the ownership fix: periodic events survive handoff, and final
+driver disposal releases the retained configuration. A second regression aborts
+a setup future and verifies that its handler and worker configuration are
+released. These tests open no network connection or audio device. They establish
+the local ownership failure and repair, not a successful live MLS exchange.
+
+The completed chat grouping changes are included: adjacent ordinary messages
+from the same author retain separate bodies with smaller gaps and one author
+header. Author changes, gaps over five minutes, UTC day changes, system events,
+replies and commands restart headers. Four grouping regressions passed. The
+UI worker supplied `dist/chat-review/chat.png` as a synthetic render; native
+interaction and real conversation rendering remain unverified.
+
+Combined validation passed: `cargo fmt --all -- --check`, strict all-target
+Clippy, 130 offline tests, six standalone DAVE policy tests and three standalone
+handshake-state tests. Four hardware/network tests remain ignored. The format
+check also corrected existing formatting in two vendored Songbird files without
+changing their behavior. The final local bundle's source identity and signature
+are verified separately after committing. The user must retest live voice:
+the receive loop should survive setup and handle later heartbeats and MLS events.
+No login, call, microphone capture, push, Actions, merge or release was performed.
+
+# Visual refresh and delayed peer diagnostics, 2026-10-09
+
+The visual refresh preserves Friends/Servers tabs, conversation ordering, expandable server channels, chat and current-call regions, and profile-adjacent voice/settings controls. Navigation now uses quiet selectable rows; neutral dark surfaces, shared soft corners, coordinated type sizes and larger spacing replace repeated boxes. Messages use existing profile portraits with fallback initials. Long headings reserve room for Call/Refresh, call metadata can wrap, and Settings remains scrollable. Authentication, persistence, account methods and media gates were not redesigned.
+
+Read Seyir's workspace, landing-page and degree-planning AGENTS files without modifying Seyir. Those current files do not reference a UI skill. The applicable global AGENTS specifies the local ui-design skill; it and the requested supafast-ui SKILL were read. Supafast's linked principles/implementation/validation/source-register resources were unavailable through the skill reader. Validation follows the accessible skill instructions: preserve behavior, compare matching views, inspect narrow/long/empty/error states and measure contrast.
+
+Ignored captures under dist/ui-review are CPU rasterizations of the actual egui meshes with synthetic fixtures, not native screenshots or live Discord data. Matching before/after chat captures cover 960×660 and 740×540; additional captures inspect login, expanded servers, current call, Settings, empty and error states. The minimum calculated normal text/status contrast across the tested surfaces is 4.98:1; secondary text is at least 5.20:1 and primary button text 8.38:1. Disabled states are excluded. Native scrolling, focus/keyboard, enlarged text and real-account rendering remain unverified. The prior denied native automation route was not retried. The temporary renderer is kept only as an ignored review artifact.
+
+The new delayed-peer trace retains initial voice JSON/binary observations through ExternalSender, then an account Roster 2 at 388646ms. The later error independently reports voice peers 2: production peer counts change only through voice ClientsConnect/ClientDisconnect, whereas account counts come from the separate account Gateway. Those snapshots cannot be assumed simultaneous. Source and an independent read-only audit found no demonstrated DAVE-wait deadlock or intentional socket pause. The WebSocket task starts before the readiness monitor; due heartbeats have first select priority; guards inspected end before readiness/media locks. There is no JSON/binary trace suppression beyond the 64-event retention limit; duplicate MediaReady alone is suppressed.
+
+The update adds opt-in VoiceLoopStarted/Stopped, VoiceEventHandled, HeartbeatSending/Sent and HeartbeatAck outcome markers. ACK outcomes are 0 unsolicited, 1 matching and 2 mismatching; neither nonce nor payload is retained. A completed handling marker after ExternalSender distinguishes that handler returning from stalling; send-start versus completion helps identify a blocked send. These are diagnostics, not a confirmed repair. Protocol framing, heartbeat cadence, encryption and timeout policy are unchanged. Capture one full trace at the displayed error during the next user-authorized test. Multi-peer voice, QR completion and remembered-login relaunch remain unresolved.
+
+Format, strict all-target Clippy, 124 offline tests and three standalone handshake tests passed; four hardware/socket tests remain ignored. The decoder regression includes a synthetic long heartbeat nonce and verifies redacted lifecycle/ACK output. No live login, call, microphone, camera, screen broadcast or credential read was performed. Changes are local commits for review; no new push, Actions, merge or public release was performed in this task.
+
+# Solo voice presentation, 2026-10-08
+
+The user confirmed no other participant for the e8cd6ff trace: complete roster 1, decoded Hello/Ready/SessionDescription, protocol 1, key-package send and accepted ExternalSender. This supports a legitimate solo waiting state, not successful multi-peer voice. The earlier multi-peer stall remains unresolved.
+
+The call badge and waiting text now say “Joined · You’re alone” only when the existing authoritative-roster policy allows solo waiting: complete matching roster count 1, no contradictory voice peers and no MLS failure. Unknown, inconsistent or multi-peer observations retain encryption pending. The readiness monitor wakes the UI when that classification changes. Peer arrival resumes the existing bounded encryption deadline; no media stream opens until actual DAVE readiness and native audio startup. Neither protocol nor timeout policy changed. Server channels and private calls both require an encrypted membership exchange; different membership and ringing state can produce different visible waiting behavior.
+
+Format, strict all-target Clippy and 124 offline tests passed (four hardware/socket checks ignored). A UI regression covers unknown, solo, contradictory voice peers, multi-member roster, MLS failure and ready labels. Existing complete-roster/own-channel and peer-arrival deadline regressions remain. Native appearance, peer-arrival interoperability, two-way voice and remembered-login relaunch remain user tests. Actions remain absent; no merge or public release.
+
+# Corrected DAVE contract and remembered login, 2026-10-08
+
+The earlier claim that opcode 26 needed an extra MLSMessage envelope was incorrect. That change in d6dd6d7 is reverted. Official [libdave package serialization](https://github.com/discord/libdave/blob/main/cpp/src/mls/session.cpp), its [ExternalSender consumer](https://github.com/discord/libdave/blob/main/cpp/test/external_sender.cpp), and [discord.js binary transport](https://github.com/discordjs/discord.js/blob/main/packages/voice/src/networking/VoiceWebSocket.ts) establish opcode 26 followed by the bare serialized KeyPackage. Initial and reinit sends now share that contract. Generic MLSMessage parsing was an inappropriate interoperability oracle.
+
+The user's confirmed d6dd6d7 trace records KeyPackage 26 and a 72-byte opcode-25 frame that decoded and was accepted as ExternalSender. It does not establish server acceptance of the key package or receipt of later proposals. The earlier KeyPackage 0 was a fixed marker after successful send, not an empty package. Roster counts from a different attempt cannot explain this trace.
+
+A separate source defect was reproduced offline: the pinned JSON event parser rejects valid optional envelope fields or fails to consume them. A borrowed envelope adapter now accepts optional fields and ordering while preserving the existing payload validator. Tests cover membership and heartbeat events. The opt-in trace adds initial roster, JSON arrival/length/decode results and socket close codes. The live stall's cause remains unproven; protocol version, encryption gates and timeout policy are unchanged.
+
+Real OpenMLS/Davey fixtures validate the bare package's signature, cipher suite, credential and lifetime; generate it before external sender; process Add/commit/welcome; and verify reset invalidation and fresh-package recovery. The encryption fixture now uses synthetic non-silence encoded bytes and checks ciphertext and tamper refusal. The former silence fixture was passthrough and did not prove encryption. These fixtures do not prove Opus playback or Discord interoperability.
+
+The nonsecret remembered-login preference was absent locally. The backend is the real macOS security-framework Keychain implementation, not a mock. Startup now migrates an existing attribute-only detectable saved entry when the preference is unset; explicit session-only/logout markers prevent migration. A failed new login preserves previous remembered access. Save/load failures retain safe numeric macOS status and appear in the connected UI. No credential value was inspected. The 608e382 and d6dd6d7 ad-hoc designated requirements have different code hashes, so access approval after updates remains possible despite a stable bundle identifier.
+
+Builds now use the stable local path `dist/latest/Fastdistord.app`; Settings and `--build-info` expose the source commit. `--login-storage-status` queries preference and Keychain attributes only, skips authentication and never requests password data. Protected entries skipped by that query may appear absent. The native metadata-only command reported `Unset` and `Unavailable(-50)` on this Mac, including after removing the numeric match-limit argument. The query retains authentication skipping; no interactive or password-read fallback was attempted. Legacy migration therefore could not be confirmed locally. Explicit remembered preferences still initiate the normal in-app restore. Actual save, Keychain approval and relaunch remain user tests.
+
+Format, strict all-target Clippy and 123 offline tests passed; four hardware/socket checks remain ignored. Three standalone structural handshake tests are checked separately. Live QR completion, saved-login relaunch, Discord acceptance, membership changes and two-way audio remain unverified. Actions remain removed; PR 2 remains draft, with no merge or public release.
+
+# QR exchange diagnostics and Discord call messages, 2026-10-08
+
+The user's QR screenshot showed HTTP 400 after mobile approval, not 429. Existing endpoint and ticket-only request match the [remote-auth reference](https://docs.discord.food/remote-authentication/desktop); source found no duplicate exchange or evidence that normal post-approval closure caused the HTTP rejection. The earlier build discarded the response, so its specific cause is unknown. Bounded zeroized error parsing retains only numeric Discord code, CAPTCHA-field presence, MFA boolean and numeric retry duration. Server messages, tickets and challenge material are skipped. HTTP 400 no longer suggests a rate-limit/challenge bypass; only detected challenge/MFA flags produce corresponding guidance. HTTP 429 displays the supplied duration and gates the QR button during this launch; an unknown duration is not invented. Requests explicitly disable retry; the state machine allows one exchange, validates ticket bounds and never replays it. No challenge solving, client impersonation headers, authentication request or session approval was performed by the agents.
+
+The user requested Discord's real call message rather than duplicate local text. Message type 3 and supplied call metadata now render directly from history/Gateway messages, with participant counts, end duration and missed-call interpretation only when valid metadata supports them. Partial MESSAGE_UPDATE replaces the existing ID without requiring repeated author/content; missing call fields preserve prior metadata. History and create events deduplicate by message ID. Local call timeline data/entries were removed; the persistent call panel and local tones remain. Known system events no longer get an empty-text placeholder; unsupported types use a generic system label. [Call message fields](https://docs.discord.food/resources/message#message-call-object) are best effort, so missing end timestamps do not assert a live call or fabricate duration.
+
+# Remembered login startup, 2026-10-08
+
+Source confirmed successful Keychain saves were possible, but startup never loaded a saved login; users had to press Connect from Keychain. Remember defaulted false every launch. Quit already preserved storage. Keychain save failure incorrectly aborted an otherwise authenticated connection. No credential values or local Keychain entries were inspected.
+
+Explicit Remember me now saves after authentication and then writes a nonsecret opt-in preference under Application Support. Startup checks that preference and makes one in-app saved-login attempt without joining voice. Session-only login disables startup; Quit/window-close cleanup never removes credentials. Save/preference failure remains visible in Settings while the authenticated session stays usable. HTTP 401 and Gateway 4004 authentication rejection are typed, stop reconnecting and attempt stale remembered credential removal; transient failures and channel permissions do not delete credentials. Explicit Logout disables the preference and attempts Keychain removal independently, clears account state and revokes audio. Service/account and bundle identifier remain stable across versioned app filenames. Ad-hoc signing may still cause macOS Keychain access prompts; no grant, ACL change, security bypass or plaintext credential fallback was added.
+
+Format, strict all-target Clippy and 112 offline tests passed (four hardware/socket tests ignored). New fake-store/policy checks cover persistence across simulated lifecycles, save denial/cancellation represented as storage failure, opt-in failure, deletion denial, logout and fixed authentication diagnostics versus network/channel errors. Native Keychain prompts, QR save and actual process relaunch remain user tests; the agents did not load/save a real credential or connect the account. Live MLS failure remains unresolved. Actions remain removed; PR 2 remains draft, no merge/public release.
+
+# Multi-peer live stall, 2026-10-08
+
+The user reports that other participants cannot hear them. Their screenshot shows protocol 1, two voice peers (including self), account roster 1, and no accepted MLS commit/welcome. This is a live multi-peer handshake failure, not proof of microphone denial. The disagreement cannot authorize indefinite solo waiting. Two-way voice remains unverified.
+
+Structural diagnostics now distinguish no proposals received, proposals received without an accepted commit, and a candidate commit successfully sent but not accepted. Opt-in trace also identifies proposals without a local session and proposals processed without a candidate. CommitSent is recorded after a successful WebSocket send. Epoch resets clear proposal/commit observations. No keys, payloads or account identifiers are retained; readiness and timeout policy are unchanged. Three standalone handshake regressions and strict all-target Clippy passed. This diagnostic change does not establish or repair the live failure's cause. Compare an opt-in trace from a fresh user-authorized join with [Discord's initial group creation sequence](https://github.com/discord/dave-protocol/blob/main/protocol.md#initial-group-creation).
+
+# Call feedback and confirmed mute follow-up, 2026-10-08
+
+The user reported no calling sound/visible call change and that web Discord showed muted while the app showed unmuted. Source confirmed there were no call tones or persistent call-status panel; successful ring REST results were ignored by the UI. More significantly, mute updates required the recovery predicate's pinned devices, so a desired unmute during DAVE setup could be withheld, and the later ready event did not resend it. UI mute represented intent, while incoming confirmed self_mute/self_deaf were not applied to the transmission gate. These findings explain possible stale/misleading state; they do not establish the observed microphone permission result or remote notification delivery.
+
+The coordinator now separates intent, confirmed self flags, server suppression/deafen, DAVE readiness and native permission. OP4 synchronization uses the owned channel/session, independently of recovery device pins. Initial/pending audio sends self_mute=true; encrypted/device readiness resends the current intent. Capture stays closed until the matching own Gateway state confirms unmuted/undeafened. Remote mute/unknown state revokes queued PCM and held PTT. Server restrictions remain authoritative; a different voice owner stops this client rather than being overwritten. UI/tray controls show blocked/pending state and explicit unmute retry.
+
+A persistent call panel shows target, observed participants, distinct request/ringing/pending/active stages, cancel/leave and connected elapsed time. Bounded local call events appear only in their matching conversation, after server call confirmation, and clear on logout/account changes. No chat message is automatically sent. Original synthesized CPAL tones use the selected speaker, optional volume and deafen/sound toggles; no microphone or recording is involved. The worker blocks without audio resources when idle and releases one-shot streams. Ringing follows actual Gateway ringing state, stops on answer/cancel/leave/logout, and cannot restart from a stale UI snapshot. A bounded, non-retried stop-ringing request targets only the recipient(s) of the explicit current call. Its outcome can be uncertain. Reference: [ring/stop-ring and call events](https://docs.discord.food/resources/channel).
+
+A read-only packaged executable invocation with --microphone-status returned “Microphone permission denied” in the tool's CLI launch context. No permission prompt or grant was triggered. This does not establish the previous running GUI build's authorization or prove the sole cause of the reported mute mismatch; confirm the new GUI's Settings status after manual launch.
+
+Native AVFoundation reports permission status without TCC database access. An explicit authorized Join/Call requests access only when DAVE is ready, checks ownership/readiness again after the asynchronous response, and opens CPAL only after authorization. Denied/restricted/unknown/unanswered requests fail without automatic retries or grant/bypass. The bundle's NSMicrophoneUsageDescription remains present. Settings guidance follows [Apple microphone settings](https://support.apple.com/guide/mac-help/control-access-to-the-microphone-on-mac-mchla1b1e1fe/mac) and [AVFoundation authorization](https://developer.apple.com/documentation/avfoundation/requesting-authorization-to-capture-and-save-media).
+
+Format, strict all-target Clippy and 108 offline tests passed, with four hardware/socket checks ignored. Offline regressions cover owned-session mute sync without device pins, confirmed/unknown/admin mute/deafen gates, queued PCM/PTT revocation, pending/denied unmute policy, channel-isolated real call events, answer/ring cancellation, active-only time, bounded original tones and stale-snapshot sound cancellation. These are offline lifecycle checks, not audible playback, native dialog, layout or live Discord interoperability tests. The agents did not open the account, ring users, send messages/media or capture a microphone. Native/live user retesting remains required. League overlay work is canceled. Actions remain removed; PR 2 stays draft, without a merge or public release.
+
+# Pending DAVE and profile navigation, 2026-10-08
+
+The user's next join reached Connecting, then failed with “DAVE end-to-end encryption did not become ready; microphone stayed closed.” The user confirmed they were alone. No successful two-way call has been established.
+
+A transport connection can now remain joined with encryption pending when a complete account Gateway roster confirms only the local user in that channel. Initial voice audio streams stay closed; optional local call tones can briefly open the speaker. A peer join starts the bounded MLS deadline; unknown/incomplete rosters and failed MLS exchanges cannot gain this indefinite waiting state. Audio starts only after an accepted commit/welcome and executed DAVE transition. Capture gating invalidates queued PCM and resets PTT across readiness changes. This does not mark pending groups ready, generate empty commits or bypass encryption. An early external-sender package arriving before a version-zero session upgrades is now retained within a fixed size bound. Explicit individual Calls ring after secure transport connection so a recipient can join the pending group; ringing remains scoped and canceled on leave/logout/switch.
+
+Settings has an opt-in, memory-only 64-event structural handshake trace. It contains local stages, relative timing, versions, counts and transition IDs, without packet payloads, keys, user IDs or credentials. Disable clears retention. Dependency TRACE logging remains compiled out. Protocol reference: [sole-member reset](https://github.com/discord/dave-protocol/blob/main/protocol.md#sole-member-reset).
+
+Selected server clicks collapse or expand its nested channels without sending a selection/leave command. Friends sort by the latest known individual DM message Snowflake, with stable name/ID ties, and update on send/receive without fetching each history. Microphone, deafen and Settings icons sit beside the profile; keyboard button behavior and accessible labels are retained. Public user portraits and guild icons use static PNGs, one background worker, fixed Discord CDN URLs, no redirects/authentication, bounded response/decode/cache sizes and initial fallbacks. Logout cancels fetches and clears textures. Presence uses observed Gateway statuses and an aggregate/single self session; missing/stale/unsupported status stays unknown. The app does not infer presence from connection state or try to detect invisible users. Sources: [Discord CDN image formats](https://docs.discord.com/developers/reference#image-formatting), [presence events](https://docs.discord.food/gateway/gateway-events#presence-update), [session aggregate semantics](https://docs.discord.food/resources/presence#session-object).
+
+Format, strict Clippy, 101 offline tests, two standalone handshake tests and six standalone DAVE policy tests passed; four hardware/socket tests remain ignored. Offline regressions exercise sole/unknown/multiple rosters, the bounded peer deadline, queued audio/PTT invalidation, pending real MLS encryption refusal and the creator's own commit without Welcome, DM recency updates, partial/unknown presence, and restricted CDN keys. Existing encryption/transition checks remain. Native visual layout, the sole-member reset sequence on Discord, two-way hardware audio, peer membership changes and recovery require another user test. The agents did not open an account, send content, ring a recipient or capture live audio/video. Process inspection was denied by the host; no running-build claim is made. PR 2 remains draft, Actions remain removed, and publication remains paused.
+
+# Live-test failure fixes, 2026-10-08
+
+The user retested build 65b40b8 and reported two failures: “Discord returned invalid conversation recipients” in Friends, and “Discord supplied an unsupported voice server port” when joining voice. These were real failures; the earlier offline checks did not establish live compatibility.
+
+Friends loading coupled two independent REST results and aborted on one conversation without usable recipients. Channel recipients are optional in the documented channel schema. List parsing now skips unsupported or malformed entries while preserving valid conversations; explicit open-DM responses remain strict. The friends and conversation requests run independently, so a failed conversation fetch cannot discard accepted friends. No recipient is inferred from a channel ID, recipient_ids, friend ordering or another account. Empty/missing recipient lists and unknown channel types are hidden with a bounded count. Invalid accepted relationships cannot discard other valid friends. Top-level invalid/oversized responses still fail.
+
+The endpoint adapter imposed a fixed signaling-port list that Discord's endpoint contract and Songbird's WSS URL construction do not require. It now preserves any canonical decimal port in 1..65535 on a validated Discord voice hostname. TLS certificate verification and the existing hostname, userinfo/path/query/IP/DNS restrictions remain. The media UDP port is separately negotiated in Voice Ready; it is not used to replace the signaling port. No downgrade, port guessing, connection fallback or automatic live join was added. Sources: [official voice endpoint and Ready payloads](https://docs.discord.com/developers/topics/voice-connections), [channel recipient schema](https://docs.discord.food/resources/channel).
+
+Format, strict Clippy and 94 offline tests passed, with four hardware/socket tests ignored. New regressions cover mixed valid/partial/empty/group/unsupported conversations, malformed relationships, independently failed social fetches, and canonical explicit signaling ports. The six existing DAVE policy checks remain unchanged and previously passed. Rebuilt Mac packaging is verified separately. No credentials, raw payloads, recipient details or voice/session tokens were inspected or logged. The actual rejected conversation entry and actual endpoint port remain unknown; this fixes the confirmed code failure paths, while successful Friends loading and two-way Discord voice require another user test. Native GUI automation is not retried. PR 2 remains draft and release publication stays paused.
+
+# Friends, server navigation and voice endpoint follow-up, 2026-10-08
+
+The connected UI now uses one sidebar with equal-width Friends | Servers tabs, inline server channels, direct conversation selection, and persistent call controls. Settings holds device, push-to-talk and volume controls; advanced explanations are collapsed. Friend and server conversation selections are remembered separately.
+
+The account adapter loads accepted friends and existing private conversations, opens a DM only on friend selection, and sends or calls only on explicit actions. Individual calls use a null guild ID on the account Gateway and the actual private channel ID for voice identification. Ringing names that recipient explicitly and runs once after encrypted voice readiness. Message scope changes cancel stale reads and clear drafts. Gateway message events update only the selected known channel.
+
+The reported join error was “Gateway supplied an invalid Discord voice endpoint.” Source inspection confirmed that the validator rejected port forms appearing in Discord documentation: port 2048 in the official voice example and port 80 in a historical API issue. The validator now accepts those forms while retaining WSS, Discord hostname checks, and rejection of arbitrary authorities, paths, credentials and malformed ports. The user's actual negotiated endpoint was not inspected, so this finding does not prove the precise cause of that live failure. References: [official voice documentation](https://docs.discord.com/developers/topics/voice-connections), [historical port report](https://github.com/discord/discord-api-docs/issues/1694). Private-call routing and ringing use the [reverse-engineered protocol reference](https://docs.discord.food/topics/voice-connections) and [channel reference](https://docs.discord.food/resources/channel); they remain unofficial and need live interoperability testing.
+
+Local format, strict Clippy, 91 deterministic tests, and six standalone Songbird DAVE policy tests passed. Four hardware/socket-dependent tests remain ignored. Focused regressions cover the rejected endpoint forms and DM/private-call scope. The Mac release build, microphone usage description and strict deep ad-hoc signature checks passed. A cached debug-info stripping warning did not prevent compilation or signing. No Actions workflow was added or run.
+
+Native GUI inspection was not retried after cancellation. The screenshot download returned HTTP 403; the error text above came from the parent task's pixel inspection. No credential entry, outgoing message, ring, microphone capture or Discord call was performed by the agents. The user must verify layout, keyboard/narrow-window behavior, friend/DM loading, text send/receive, two-way voice, DAVE membership changes, leave/rejoin, and recovery. PR 2 remains draft; release publication and merging are paused.
+
 # Version 0.01 packaging and production UI, 2026-10-08
 
 Current production UI contains account entry, voice and text only. Standalone media previews, codec diagnostics and the audio diagnostics panel were removed; automated/headless media tests remain. Local format, strict Clippy, all 77 deterministic tests and the SemVer 0.0.1 Mac bundle/signature checks passed. The user-facing version is 0.01. Native GUI inspection was not retried after cancellation. Hardware and live Discord behavior remain unverified; the user will perform live testing.

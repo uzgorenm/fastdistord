@@ -6,6 +6,10 @@ use tracing::trace;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredPacket {
     pub packet: Bytes,
+    // Preserve the authenticated media bounds across jitter buffering. DAVE
+    // shrinks the payload in place, leaving non-media bytes in the allocation.
+    pub payload_offset: usize,
+    pub payload_end_pad: usize,
     // We need to store this as it's possible that a user can change config modes.
     pub decrypted: bool,
 }

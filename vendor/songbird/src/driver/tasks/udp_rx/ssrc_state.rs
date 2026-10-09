@@ -6,14 +6,13 @@ use crate::{
     },
     events::context_data::{RtpData, VoiceData},
 };
-use discortp::{rtp::RtpExtensionPacket, Packet, PacketSize};
+use discortp::Packet;
 use opus2::{Decoder as OpusDecoder, ErrorCode};
 use tracing::{error, warn};
 
 #[derive(Debug)]
 pub struct SsrcState {
     playout_buffer: PlayoutBuffer,
-    crypto_mode: CryptoMode,
     decoder: OpusDecoder,
     decode_size: PacketDecodeSize,
     pub(crate) prune_time: Instant,
@@ -22,7 +21,7 @@ pub struct SsrcState {
 }
 
 impl SsrcState {
-    pub fn new(pkt: &RtpPacket<'_>, crypto_mode: CryptoMode, config: &Config) -> Self {
+    pub fn new(pkt: &RtpPacket<'_>, config: &Config) -> Self {
         let playout_capacity = config.playout_buffer_length.get() + config.playout_spike_length;
         let (sample_rate, channels) = match config.decode_mode {
             DecodeMode::Decode(config) => (config.sample_rate, config.channels),
@@ -31,7 +30,6 @@ impl SsrcState {
 
         Self {
             playout_buffer: PlayoutBuffer::new(usize::from(playout_capacity), pkt.get_sequence().0),
-            crypto_mode,
             decoder: OpusDecoder::new(sample_rate.into(), channels.into())
                 .expect("Failed to create new Opus decoder for source."),
             decode_size: PacketDecodeSize::TwentyMillis,
@@ -64,7 +62,7 @@ impl SsrcState {
         // different cases: null packet who we want to decode as a miss, and packet who we must ignore temporarily.
         let m_pkt = self.playout_buffer.fetch_packet(config);
         let pkt = match m_pkt {
-            PacketLookup::Packet(StoredPacket { packet, decrypted }) => Some((packet, decrypted)),
+            PacketLookup::Packet(packet) => Some(packet),
             PacketLookup::MissedPacket => None,
             PacketLookup::Filling => return Ok(None),
         };
@@ -75,13 +73,23 @@ impl SsrcState {
         };
 
         let should_decode = config.decode_mode.should_decode();
-        if let Some((packet, decrypted)) = pkt {
+        if let Some(StoredPacket {
+            packet,
+            payload_offset,
+            payload_end_pad,
+            decrypted,
+        }) = pkt
+        {
             let rtp = RtpPacket::new(&packet).unwrap();
-            let extensions = rtp.get_extension() != 0;
 
             let payload = rtp.payload();
-            let payload_offset = self.crypto_mode.payload_prefix_len();
-            let payload_end_pad = payload.len() - self.crypto_mode.payload_suffix_len();
+            let end = payload
+                .len()
+                .checked_sub(payload_end_pad)
+                .ok_or(Error::IllegalVoicePacket)?;
+            let media = payload
+                .get(payload_offset..end)
+                .ok_or(Error::IllegalVoicePacket)?;
 
             // We still need to compute missed packets here in case of long loss chains or similar.
             // This occurs due to the fallback in 'store_packet' (i.e., empty buffer and massive seq difference).
@@ -89,13 +97,9 @@ impl SsrcState {
             let new_seq: u16 = rtp.get_sequence().into();
             let missed_packets = new_seq.saturating_sub(self.playout_buffer.next_seq().0);
 
-            // TODO: maybe hand over audio and extension indices alongside packet?
-            let (audio, _packet_size) = self.scan_and_decode(
-                &payload[payload_offset..payload_end_pad],
-                extensions,
-                missed_packets,
-                should_decode && decrypted,
-            )?;
+            // RTP extensions, padding, transport trailers and DAVE supplemental
+            // data were excluded by the authenticated packet processor already.
+            let audio = self.decode_packet(media, missed_packets, should_decode && decrypted)?;
 
             let rtp_data = RtpData {
                 packet,
@@ -119,24 +123,12 @@ impl SsrcState {
         Ok(Some(out))
     }
 
-    fn scan_and_decode(
+    fn decode_packet(
         &mut self,
         data: &[u8],
-        extension: bool,
         missed_packets: u16,
         decode: bool,
-    ) -> Result<(Option<Vec<i16>>, usize)> {
-        let start = if extension {
-            RtpExtensionPacket::new(data)
-                .map(|pkt| pkt.packet_size())
-                .ok_or_else(|| {
-                    error!("Extension packet indicated, but insufficient space.");
-                    Error::IllegalVoicePacket
-                })
-        } else {
-            Ok(0)
-        }?;
-
+    ) -> Result<Option<Vec<i16>>> {
         let pkt = if decode {
             let mut out = vec![0; self.decode_size.len()];
 
@@ -156,7 +148,7 @@ impl SsrcState {
             // This should scan up to find the "correct" size that a source is using,
             // and then remember that.
             loop {
-                let tried_audio_len = self.decoder.decode(&data[start..], &mut out, false);
+                let tried_audio_len = self.decoder.decode(data, &mut out, false);
                 match tried_audio_len {
                     Ok(audio_len) => {
                         // Decoding to stereo: audio_len refers to sample count irrespective of channel count.
@@ -186,6 +178,6 @@ impl SsrcState {
             None
         };
 
-        Ok((pkt, data.len() - start))
+        Ok(pkt)
     }
 }

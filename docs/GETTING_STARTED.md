@@ -15,7 +15,7 @@ A native Rust/fastframe Discord voice and text client. macOS Apple Silicon is th
 - Session-only credentials by default; explicitly optional macOS Keychain save, removed on logout
 - Audio shutdown on leave/quit/logout, stale join cancellation, safe stop on disconnect/move/permission changes
 
-- Plain-text guild messaging: bounded history, manual refresh and explicit Send; mentions and embeds suppressed
+- Friends and private conversations, individual DM calls, and plain-text guild/DM messaging; bounded history and explicit Send, with mentions and embeds suppressed
 
 Discord video and screen sending are unfinished and are not exposed as working call controls; see [media status](MEDIA.md). League overlay work is stopped.
 
@@ -51,7 +51,7 @@ The script validates the microphone usage description and adds a local ad-hoc si
 1. Read the unofficial-access risk disclosure. No official desktop/web client needs to be running for this adapter.
 2. Read the short account-access disclosure and choose **Connect with QR code**. Scan the code using Discord on your phone and approve the login there. Only approve a code you started yourself. An expired/canceled login needs a fresh Connect.
 3. Leave “Remember in macOS Keychain” unchecked for session-only access. Optional saving happens after successful account validation. **Connect from Keychain** reads a credential you previously chose to save in this app. Existing local session entry remains available under its disclosure; never extract another app’s credentials or put tokens in chat or commands.
-4. Choose a server and voice channel, then click Join. **This action authorizes opening your selected audio devices and joining that specific channel.** The OS may request microphone permission.
+4. Choose **Servers**, select a server, then click **Join · channel**. Or choose a friend and click **Call** in the conversation. **This action authorizes opening your selected audio devices and joining that specific channel.** The OS may request microphone permission.
 5. Transmission starts muted. Use headphones; select your intended mode and unmute. Enabling PTT does not itself unmute. Deafen also blocks outgoing audio.
 6. Leave releases capture. Closing the window keeps an active call resident; use the tray to reopen or Quit to exit.
 

@@ -31,14 +31,18 @@ cpal = "0.18.2"
 rtrb = "0.4"
 rubato = "0.16"
 symphonia-core = "0.5.5"
+# Songbird's RawAdapter needs the PCM decoder for the live f32 microphone stream.
+symphonia = { version = "=0.5.5", default-features = false, features = ["pcm"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+time = { version = "=0.3.55", features = ["parsing", "formatting"] }
 zeroize = { version = "1", features = ["derive", "serde"] }
 songbird = { path = "vendor/songbird", default-features = false, features = ["driver", "receive", "rustls", "tungstenite"] }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
 egui = "=0.36.1"
 eframe = { version = "=0.36.1", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 fastframe-shell = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
@@ -72,6 +76,8 @@ codegen-units = 1
 strip = "debuginfo"
 
 [dev-dependencies]
+# Expose the production receive path to offline encrypted-packet regressions.
+songbird = { path = "vendor/songbird", default-features = false, features = ["receive-test"] }
 openmls = "=0.8.2"
 openmls_rust_crypto = "=0.5.1"
 openmls_basic_credential = "=0.5.0"

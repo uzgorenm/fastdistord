@@ -47,6 +47,54 @@ it does not implement or replace any encryption, MLS, codec, or packet format.
 
 ## Verification and limits
 
+The receive jitter buffer retains each packet's authenticated media offset and
+trailing-byte count. Transport decryption excludes RTP extensions and padding;
+DAVE decryption shortens the payload in place. Reconstructing bounds later from
+the transport mode included leftover DAVE ciphertext in the Opus decoder input.
+Playout now uses the saved bounds and reports the same bounds in `RtpData`.
+Failed transport authentication and invalid padding/bounds are dropped before
+buffering. Required DAVE authentication and readiness checks are unchanged.
+
+The development-only `receive-test` feature exposes a socket-free harness for
+the production packet processor and playout decoder. The UDP socket is owned by
+the receive runner future, while the packet-processing state needs no socket.
+This feature does not enable upstream's benchmark scheduling changes and is not
+enabled by the normal release dependency. Offline MLS tests verify exact Opus
+and PCM recovery under both AEAD modes, with/without RTP extensions and padding,
+and reject replay, tampering, plaintext, unknown senders, unready encryption and
+malformed packets. These fixtures do not verify physical speaker output or a
+live Discord peer.
+
+Application ownership must account for this upstream `Driver` behavior:
+dropping any clone sends `CoreMessage::Poison` and shuts down its workers.
+Fastdistord transfers the original driver out of its pending setup guard on
+success; it must not clone and drop the original at that boundary. Offline
+transport regressions verify that the registered event handler survives the
+handoff and that aborted setup releases its workers. The vendor's clone/drop
+semantics are unchanged.
+
+The standalone driver accepts a private call with `guild_id: None`. Voice
+Identify and Resume then use the real DM channel ID as `server_id`; guild calls
+continue using their guild ID. Connect/disconnect event metadata keeps the
+optional guild rather than fabricating one. The bot gateway frontend still
+creates guild calls only. This adds private-call routing, not bot access to DMs.
+Private-channel `server_id` routing is described by the reverse-engineered
+reference https://docs.discord.food/topics/voice-connections, rather than
+Discord's official bot API documentation; live user-account compatibility is
+still unverified.
+
+The application accepts strictly validated Discord voice authorities with an
+optional canonical decimal port in 1..65535. Songbird keeps explicit ports in
+its WSS URL; the authenticated Gateway selects that signaling authority. The
+UDP media address/port arrives separately in Voice Ready. An earlier fixed
+443/80/2048 allowlist rejected the user's live endpoint and was removed; no port
+is guessed or silently stripped. WSS, certificate verification and the Discord
+hostname suffix restriction remain mandatory. Other schemes/hosts, userinfo,
+paths, IP literals, malformed DNS labels and malformed/out-of-range ports fail
+without echoing the supplied address. See the official endpoint example and
+separate UDP Ready payload in
+https://docs.discord.com/developers/topics/voice-connections.
+
 The application transport tests cover credential-safe diagnostics, endpoint
 validation, channel-ID mapping, invalid IDs, and capture-epoch revocation.
 `src/driver/dave_policy.rs` contains dependency-free production policy tests for
@@ -65,3 +113,23 @@ No Discord session was opened or microphone captured during implementation.
 Do not enable dependency TRACE logging: davey 0.1.4 includes cryptographic secret
 material in TRACE events. The application must compile those levels out and
 must not attach a subscriber that restores them in an altered dependency build.
+
+## Pending sole-member handshake
+
+`DaveHandshake` records bounded structural observations and an opt-in memory-only
+64-event trace. The application can wait without opening initial audio devices
+when its complete account Gateway voice roster confirms only itself is present.
+Unknown/incomplete rosters, multiple participants and MLS failures retain a
+bounded media handshake deadline. A locally prepared MLS group remains distinct
+from an executed transition; neither a timer nor peer absence makes it ready.
+
+A bounded public external-sender package is retained if it arrives before a
+version-zero session upgrades through PrepareEpoch. Readiness invalidation also
+closes the application's capture gate synchronously, revoking queued PCM and
+requiring a fresh PTT press. Existing packet-generation and media-lock guards
+continue to reject stale frames across prepare/execute transitions.
+
+Protocol: https://github.com/discord/dave-protocol/blob/main/protocol.md#sole-member-reset
+Offline crypto fixtures verify pending groups cannot encrypt Opus and that the
+creator's own accepted commit can establish a group without receiving Welcome.
+These checks do not establish live Discord interoperability.

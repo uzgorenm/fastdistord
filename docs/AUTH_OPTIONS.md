@@ -20,7 +20,7 @@ The explicit Connect action starts a fresh ephemeral RSA-2048 OAEP/SHA-256 hands
 
 Private key components and owned decrypted nonce/token buffers are erased on drop. Transport/serialization libraries may hold temporary copies; memory erasure is not a guarantee of eliminating every allocator copy. The session is sent to the existing account adapter without logs or chat exposure. Optional Keychain saving is separately opt-in and occurs after account validation. Logout erases local access and saved credentials; it does not prove server-side revocation. Use Discord device/session controls or change the Discord password to end all sessions.
 
-Offline crypto and protocol-order fixtures are tested; they create no Discord session. Native GUI, remote-auth interoperability and mobile approval remain unverified until the user tests the flow. No real QR/session or credential was created during implementation.
+Offline crypto, timing and protocol-order fixtures are tested. A network probe using the app’s Rust transport received Discord’s public hello, then closed without sending init or requesting a QR/session. The observed server lifetime was 308377 ms; the app now caps that to its three-minute local limit instead of rejecting the handshake. Error messages expose only locally defined categories and numeric status/close codes, never server payloads. Native GUI, the remaining remote-auth handshake and mobile approval still require user testing.
 
 ## Local devices
 

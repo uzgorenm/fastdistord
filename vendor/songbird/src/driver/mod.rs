@@ -20,6 +20,8 @@ mod mix_mode;
 pub mod retry;
 mod scheduler;
 pub(crate) mod tasks;
+#[cfg(feature = "receive-test")]
+pub use tasks::udp_rx::ReceiveHarness;
 #[cfg(test)]
 pub(crate) mod test_config;
 #[cfg(any(test, feature = "internals"))]

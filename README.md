@@ -4,21 +4,22 @@
 
 [Get started](docs/GETTING_STARTED.md) · [Controls and help](docs/USING.md) · [Contribute](CONTRIBUTING.md)
 
-The sign-in screen offers fresh QR login with mobile approval or explicit macOS Keychain reconnect. Connected accounts show servers, channels and persistent call controls.
+The sign-in screen offers fresh QR login with mobile approval or macOS Keychain reconnect. Choose **Remember me** to reconnect on future launches. Use **Friends | Servers** in one sidebar. Friends open conversations; server channels appear beneath the selected server. Click the selected server to collapse or expand its channels. Friends follow recent DM activity; profile controls stay visible while you browse.
 
 ## Download and install
 
-Version **0.01** is being verified and has not been published as a GitHub Release yet. Hosted download links will be added after the actual packages are available. For now, [build from source](#build-from-source).
+See [GitHub Releases](https://github.com/uzgorenm/fastdistord/releases) for available downloads. Only assets attached to a release are published packages. Repository access is required while the project is private.
 
-Packages: Mac Apple Silicon DMG, Windows x64 EXE installer, and a Linux amd64 Debian package for Ubuntu 24.04 or compatible systems. Mac/Windows packages are not notarized/vendor-signed.
+The native package for version **0.01** targets macOS 13 or later on Apple Silicon. It has a local ad-hoc signature and is not notarized. Windows and Linux downloads are not available for this release; [build from source](#build-from-source) on those platforms.
 
 ## Features
 
-- Browse servers and voice channels, with participants and speaking indicators
+- Browse friends, private conversations and server channels in one sidebar
+- Start individual friend calls, with persistent call status, local events and optional sounds
 - Two-way voice with DAVE encryption, mute, deafen and push-to-talk
 - Choose microphones and speakers, check input levels and adjust output volume
 - Stay in a call from the tray where supported, with bounded device/session recovery
-- Read the latest 50 text-channel messages, refresh and send plain-text messages
+- Read the latest 50 channel or DM messages and send plain text; new messages arrive through the Gateway
 - Connect with a fresh QR code and mobile approval; optional macOS Keychain storage
 
 The app starts muted and does not record audio or collect telemetry.
@@ -27,10 +28,10 @@ The app starts muted and does not record audio or collect telemetry.
 
 1. Launch Fastdistord. You can explore the offline interface without credentials.
 2. Read the account-access sentence, then choose **Connect with QR code**.
-3. Scan the fresh code with Discord on your phone and approve there. Only approve a login you started here. Keychain storage is optional; otherwise the session stays in memory.
-4. Choose a server and voice channel, then select **Join**. Allow microphone access if prompted, confirm encrypted voice readiness and unmute when ready.
-5. For push-to-talk, hold **Ctrl+Shift+Space** or the **Talk** button. Select a text channel to read, refresh or send messages.
-6. **Leave** releases audio devices. Closing the window may keep an active call running; **Quit** ends it.
+3. Scan the fresh code with Discord on your phone and approve there. Only approve a login you started here. Select **Remember me** to save in macOS Keychain and reconnect on launch. Otherwise the session stays in memory.
+4. Choose **Servers**, then a server and **Join · channel**. Allow microphone access if prompted, confirm encrypted voice readiness and unmute when ready.
+5. Choose a friend to chat; **Call** starts an individual voice call. Enable push-to-talk in Settings, then hold **Ctrl+Shift+Space** or **Hold to talk** while unmuted.
+6. **Disconnect** releases audio devices. Closing the window may keep an active call running; **Quit** ends it.
 
 See the [first-call walkthrough](docs/GETTING_STARTED.md#account-and-first-call) and [controls and troubleshooting](docs/USING.md).
 
@@ -38,7 +39,7 @@ See the [first-call walkthrough](docs/GETTING_STARTED.md#account-and-first-call)
 
 Personal-account access uses an unofficial integration that may break or lead to Discord account restrictions. Fastdistord is independent and is not affiliated with Discord.
 
-Voice and text still need live testing. Video and screen-share sending are unfinished. Use headphones: echo cancellation, noise suppression and automatic gain control are not implemented.
+Voice, friend calls and messaging still need live testing. Video and screen-share sending are unfinished. Use headphones: echo cancellation, noise suppression and automatic gain control are not implemented.
 
 See [verification status](docs/VERIFICATION.md), [media status](docs/MEDIA.md) and the [live-test checklist](docs/LIVE_TEST.md) for details.
 
@@ -58,7 +59,7 @@ To create and open an Apple Silicon app bundle, run on macOS with Xcode command-
 ```sh
 rustup target add aarch64-apple-darwin
 ./scripts/bundle-macos.sh
-open dist/Fastdistord.app
+open dist/latest/Fastdistord.app
 ```
 
 See [Packaging](PACKAGING.md) for bundle details.

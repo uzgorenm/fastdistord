@@ -63,7 +63,8 @@ impl Connection {
     ) -> Result<Connection> {
         let url = generate_url(&info.endpoint)?;
 
-        let mut client = WsStream::connect(url).await?;
+        let mut client = WsStream::connect(url, config.dave_handshake.clone()).await?;
+        config.dave_handshake.record(crate::DaveStage::Connected, 0);
         let (ws_msg_tx, ws_msg_rx) = flume::unbounded();
 
         let mut hello = None;
@@ -71,7 +72,7 @@ impl Connection {
 
         client
             .send_json(&GatewayEvent::from(Identify {
-                server_id: info.guild_id.into(),
+                server_id: info.server_id(),
                 session_id: info.session_id.clone(),
                 token: info.token.clone(),
                 user_id: info.user_id.into(),
@@ -79,6 +80,9 @@ impl Connection {
             }))
             .await?;
 
+        config
+            .dave_handshake
+            .record(crate::DaveStage::Identify, davey::DAVE_PROTOCOL_VERSION);
         loop {
             let Some(value) = client.recv_event().await? else {
                 continue;
@@ -186,7 +190,7 @@ impl Connection {
         }
 
         let (cipher, dave_session, dave_protocol_version) =
-            init_cipher(&mut client, &info, chosen_crypto, &ws_msg_tx).await?;
+            init_cipher(&mut client, &info, chosen_crypto, &ws_msg_tx, config).await?;
         let dave_session = Arc::new(RwLock::new(dave_session));
         let dave_protocol_version = Arc::new(dave_protocol_version);
 
@@ -284,23 +288,23 @@ impl Connection {
     #[instrument(skip(self))]
     pub async fn reconnect(&mut self, config: &Config) -> Result<()> {
         if let Some(t) = config.driver_timeout {
-            timeout(t.into(), self.reconnect_inner()).await?
+            timeout(t.into(), self.reconnect_inner(config)).await?
         } else {
-            self.reconnect_inner().await
+            self.reconnect_inner(config).await
         }
     }
 
     #[instrument(skip(self))]
-    pub async fn reconnect_inner(&mut self) -> Result<()> {
+    pub async fn reconnect_inner(&mut self, config: &Config) -> Result<()> {
         let url = generate_url(&self.info.endpoint)?;
 
         // Thread may have died, we want to send to prompt a clean exit
         // (if at all possible) and then proceed as normal.
-        let mut client = WsStream::connect(url).await?;
+        let mut client = WsStream::connect(url, config.dave_handshake.clone()).await?;
 
         client
             .send_json(&GatewayEvent::from(Resume {
-                server_id: self.info.guild_id.into(),
+                server_id: self.info.server_id(),
                 session_id: self.info.session_id.clone(),
                 token: self.info.token.clone(),
             }))
@@ -361,6 +365,7 @@ async fn init_cipher(
     info: &ConnectionInfo,
     mode: CryptoMode,
     tx: &Sender<WsMessage>,
+    config: &Config,
 ) -> Result<(Cipher, Option<davey::DaveSession>, AtomicU16)> {
     loop {
         let Some(value) = client.recv_event().await? else {
@@ -369,6 +374,9 @@ async fn init_cipher(
 
         match value {
             GatewayEvent::SessionDescription(desc) => {
+                config
+                    .dave_handshake
+                    .record(crate::DaveStage::Protocol, desc.dave_protocol_version);
                 if desc.mode != mode.to_request_str() {
                     return Err(Error::CryptoModeInvalid);
                 }
@@ -391,6 +399,9 @@ async fn init_cipher(
                             }))
                             .await?;
 
+                        config
+                            .dave_handshake
+                            .record(crate::DaveStage::KeyPackage, 26);
                         Some(session)
                     } else {
                         None

@@ -42,7 +42,11 @@ impl ConnectionProgress {
 
     pub(crate) fn guild_id(&self) -> GuildId {
         match self {
-            ConnectionProgress::Complete(conn_info) => conn_info.guild_id,
+            // The gateway frontend only constructs guild calls. Private calls
+            // are supplied directly to Driver and never enter this state.
+            ConnectionProgress::Complete(conn_info) => conn_info
+                .guild_id
+                .expect("gateway-managed voice calls always have a guild"),
             ConnectionProgress::Incomplete(part) => part.guild_id,
         }
     }
@@ -109,14 +113,27 @@ pub struct ConnectionInfo {
     pub endpoint: String,
     /// ID of the target voice channel's parent guild.
     ///
-    /// Bots cannot connect to a guildless (i.e., direct message) voice call.
-    pub guild_id: GuildId,
+    /// None for a private call supplied to the standalone driver. The bot
+    /// gateway frontend continues to create guild calls only.
+    pub guild_id: Option<GuildId>,
     /// Unique string describing this session for validation/authentication purposes.
     pub session_id: String,
     /// Ephemeral secret used to validate the above session.
     pub token: String,
     /// UserID of this bot.
     pub user_id: UserId,
+}
+
+#[cfg(feature = "driver")]
+impl ConnectionInfo {
+    /// Voice Identify/Resume server ID: guild for server channels, channel for
+    /// private calls. The voice wire model names this numeric type GuildId.
+    pub fn server_id(&self) -> crate::model::id::GuildId {
+        crate::model::id::GuildId(
+            self.guild_id
+                .map_or(self.channel_id.0.get(), |id| id.0.get()),
+        )
+    }
 }
 
 impl fmt::Debug for ConnectionInfo {
@@ -170,7 +187,7 @@ impl Partial {
                 endpoint,
                 session_id,
                 token,
-                guild_id: self.guild_id,
+                guild_id: Some(self.guild_id),
                 user_id: self.user_id,
             })
         } else {

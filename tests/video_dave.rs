@@ -6,6 +6,7 @@ use std::num::NonZeroU16;
 use davey::{DaveSession, MediaType, ProposalsOperationType};
 use fastdistord::video::{EncodedVideoFrame, VideoAuthority, VideoCodec};
 use openmls::prelude::*;
+use openmls::treesync::LeafNodeSource;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use tls_codec::{DeserializeBytes, Serialize};
@@ -30,6 +31,19 @@ impl OfflineGroup {
         .unwrap();
         alice.set_external_sender(&external).unwrap();
         bob.set_external_sender(&external).unwrap();
+        assert!(
+            !alice.is_ready() && !bob.is_ready(),
+            "a sole pending group must not expose a media ratchet"
+        );
+        assert!(alice.encrypt_opus(&[0xf8, 0xff, 0xfe]).is_err());
+        let empty = VLBytes::new(vec![]).tls_serialize_detached().unwrap();
+        assert!(
+            alice
+                .process_proposals(ProposalsOperationType::APPEND, &empty, Some(&[101]))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!alice.is_ready());
         let package = KeyPackageIn::tls_deserialize_exact_bytes(&bob.create_key_package().unwrap())
             .unwrap()
             .validate(
@@ -56,7 +70,15 @@ impl OfflineGroup {
             )
             .unwrap()
             .unwrap();
+        assert!(
+            !alice.is_ready() && !bob.is_ready(),
+            "preparing a commit is not negotiated media readiness"
+        );
         alice.process_commit(&result.commit).unwrap();
+        assert!(
+            alice.is_ready(),
+            "the creator establishes keys from its echoed commit without receiving a Welcome"
+        );
         bob.process_welcome(result.welcome.as_ref().unwrap())
             .unwrap();
         assert!(alice.is_ready() && bob.is_ready());
@@ -543,4 +565,418 @@ fn synthetic_encrypted_video_over_loopback_udp() {
             .unwrap(),
         plaintext
     );
+}
+
+#[test]
+fn reported_initial_order_matches_bare_package_send_contract_and_preserves_welcome_key() {
+    let version = NonZeroU16::new(1).unwrap();
+    let trace = songbird::DaveHandshake::default();
+    trace.set_enabled(true);
+    trace.record(songbird::DaveStage::Connected, 0);
+    trace.record(songbird::DaveStage::Identify, 1);
+    trace.record(songbird::DaveStage::Protocol, 1);
+    let mut pending = DaveSession::new(version, 202, 303, None).unwrap();
+    let raw = pending.create_key_package().unwrap();
+    // libdave ExternalSender::ProposeAdd consumes a bare KeyPackage, while
+    // discord.js prepends only opcode 26 to Davey's unchanged package.
+    let frame = songbird::key_package_frame(&raw);
+    assert!(frame.len() == raw.len() + 1 && frame[0] == 26 && frame[1..] == raw);
+    let package = KeyPackageIn::tls_deserialize_exact_bytes(&frame[1..])
+        .unwrap()
+        .validate(
+            OpenMlsRustCrypto::default().crypto(),
+            ProtocolVersion::Mls10,
+        )
+        .unwrap();
+    assert!(package.ciphersuite() == pending.ciphersuite());
+    assert!(package.ciphersuite().tls_serialize_detached().unwrap() == [0, 2]);
+    assert!(package.leaf_node().credential().credential_type() == CredentialType::Basic);
+    assert!(package.leaf_node().credential().serialized_content() == 202u64.to_be_bytes());
+    let LeafNodeSource::KeyPackage(lifetime) = package.leaf_node().leaf_node_source() else {
+        panic!("Expected key package lifetime");
+    };
+    assert!(lifetime.not_before() == 0 && lifetime.not_after() == u64::MAX);
+    trace.record(songbird::DaveStage::KeyPackage, 26);
+    trace.record(songbird::DaveStage::Peers, 2);
+    let mut creator = DaveSession::new(version, 101, 303, None).unwrap();
+    let sender = SignatureKeyPair::new(creator.ciphersuite().signature_algorithm()).unwrap();
+    let external = ExternalSender::new(
+        sender.public().into(),
+        BasicCredential::new(b"offline-delivery-fixture".to_vec()).into(),
+    )
+    .tls_serialize_detached()
+    .unwrap();
+    pending.set_external_sender(&external).unwrap();
+    creator.set_external_sender(&external).unwrap();
+    trace.record(songbird::DaveStage::ExternalSender, 25);
+    assert!(!pending.is_ready());
+    assert!(pending.encrypt_opus(&[0xf8, 0xff, 0xfe]).is_err());
+    let proposal = ExternalProposal::new_add::<OpenMlsRustCrypto>(
+        package,
+        creator.group().unwrap().group_id().clone(),
+        creator.epoch().unwrap(),
+        &sender,
+        SenderExtensionIndex::new(0),
+    )
+    .unwrap()
+    .tls_serialize_detached()
+    .unwrap();
+    let proposals = VLBytes::new(proposal).tls_serialize_detached().unwrap();
+    let candidate = creator
+        .process_proposals(
+            ProposalsOperationType::APPEND,
+            &proposals,
+            Some(&[101, 202]),
+        )
+        .unwrap()
+        .unwrap();
+    creator.process_commit(&candidate.commit).unwrap();
+    pending
+        .process_welcome(candidate.welcome.as_ref().unwrap())
+        .unwrap();
+    assert!(pending.is_ready() && creator.is_ready());
+    // Synthetic encoded bytes, deliberately different from the special F8FFFE
+    // silence packet. This checks DAVE encryption/authentication, not Opus playback.
+    let encoded = [0xf8, 0x01, 0x02, 0x03, 0x04];
+    let audio = pending.encrypt_opus(&encoded).unwrap();
+    assert!(audio.as_ref() != encoded);
+    let mut tampered = audio.to_vec();
+    tampered[1] ^= 1;
+    assert!(creator.decrypt(202, MediaType::AUDIO, &tampered).is_err());
+    assert_eq!(
+        creator.decrypt(202, MediaType::AUDIO, &audio).unwrap(),
+        encoded
+    );
+    assert!(trace.trace().contains("KeyPackage 26"));
+}
+
+#[test]
+fn v4_binary_decode_records_safe_headers_and_local_failures() {
+    let trace = songbird::DaveHandshake::default();
+    trace.set_enabled(true);
+    for frame in [
+        vec![25, 1, 2],
+        vec![27, 0, 0],
+        vec![29, 0, 1, 0],
+        vec![30, 0, 1, 0],
+    ] {
+        assert!(songbird::decode_dave_binary(&frame, &trace).is_ok());
+    }
+    for frame in [
+        vec![],
+        vec![27],
+        vec![27, 9],
+        vec![29, 0],
+        vec![30, 0],
+        vec![0, 1, 27, 0],
+    ] {
+        assert!(songbird::decode_dave_binary(&frame, &trace).is_err());
+    }
+    let exported = trace.trace();
+    for opcode in [25, 27, 29, 30] {
+        assert!(exported.contains(&format!("BinaryDecoded {opcode}")));
+    }
+    assert!(exported.contains("SequencedOpcode 27"));
+    assert!(exported.contains("BinaryDecodeFailed 1"));
+    assert!(exported.contains("BinaryDecodeFailed 2"));
+    assert!(exported.contains("BinaryDecodeFailed 3"));
+    assert!(!exported.contains("payload") && !exported.contains("data="));
+}
+
+#[test]
+fn reset_invalidates_old_package_and_fresh_package_can_be_welcomed() {
+    let version = NonZeroU16::new(1).unwrap();
+    let mut pending = DaveSession::new(version, 202, 303, None).unwrap();
+    let old = pending.create_key_package().unwrap();
+    let sender = SignatureKeyPair::new(pending.ciphersuite().signature_algorithm()).unwrap();
+    let external = ExternalSender::new(
+        sender.public().into(),
+        BasicCredential::new(b"offline-delivery-fixture".to_vec()).into(),
+    )
+    .tls_serialize_detached()
+    .unwrap();
+    pending.set_external_sender(&external).unwrap();
+    pending.reinit(version, 202, 303, None).unwrap();
+    let fresh = pending.create_key_package().unwrap();
+    let make_welcome = |package: &[u8]| {
+        let mut creator = DaveSession::new(version, 101, 303, None).unwrap();
+        creator.set_external_sender(&external).unwrap();
+        let package = KeyPackageIn::tls_deserialize_exact_bytes(package)
+            .unwrap()
+            .validate(
+                OpenMlsRustCrypto::default().crypto(),
+                ProtocolVersion::Mls10,
+            )
+            .unwrap();
+        let proposal = ExternalProposal::new_add::<OpenMlsRustCrypto>(
+            package,
+            creator.group().unwrap().group_id().clone(),
+            creator.epoch().unwrap(),
+            &sender,
+            SenderExtensionIndex::new(0),
+        )
+        .unwrap()
+        .tls_serialize_detached()
+        .unwrap();
+        let candidate = creator
+            .process_proposals(
+                ProposalsOperationType::APPEND,
+                &VLBytes::new(proposal).tls_serialize_detached().unwrap(),
+                Some(&[101, 202]),
+            )
+            .unwrap()
+            .unwrap();
+        candidate.welcome.unwrap()
+    };
+    assert!(pending.process_welcome(&make_welcome(&old)).is_err());
+    assert!(!pending.is_ready());
+    pending.process_welcome(&make_welcome(&fresh)).unwrap();
+    assert!(pending.is_ready());
+}
+
+#[test]
+fn json_receive_trace_retains_only_opcode_length_and_outcome() {
+    let trace = songbird::DaveHandshake::default();
+    trace.set_enabled(true);
+    assert!(
+        songbird::decode_dave_json(r#"{"op":11,"d":{"user_ids":["101","202"]}}"#, &trace).is_ok()
+    );
+    assert!(
+        songbird::decode_dave_json(
+            r#"{"op":999,"d":{"token":"synthetic-private-data"}}"#,
+            &trace
+        )
+        .is_err()
+    );
+    assert!(songbird::decode_dave_json(r#"{"op":6,"d":1234567890123}"#, &trace).is_ok());
+    trace.record(songbird::DaveStage::VoiceLoopStarted, 0);
+    trace.record(songbird::DaveStage::HeartbeatSending, 0);
+    trace.record(songbird::DaveStage::HeartbeatSent, 0);
+    trace.record(songbird::DaveStage::HeartbeatAck, 1);
+    trace.record(songbird::DaveStage::VoiceEventHandled, 6);
+    trace.record(songbird::DaveStage::VoiceLoopStopped, 0);
+    let exported = trace.trace();
+    assert!(!exported.contains("1234567890123"));
+    assert!(exported.contains("JsonDecoded 6"));
+    assert!(exported.contains("HeartbeatAck 1"));
+    assert!(exported.contains("VoiceLoopStopped 0"));
+    assert!(exported.contains("JsonDecoded 11"));
+    assert!(exported.contains("JsonDecodeFailed 999"));
+    assert!(
+        !exported.contains("synthetic-private-data")
+            && !exported.contains("user_ids")
+            && !exported.contains("token")
+    );
+}
+
+#[test]
+fn optional_json_envelope_fields_do_not_drop_membership_or_heartbeat() {
+    let trace = songbird::DaveHandshake::default();
+    trace.set_enabled(true);
+    let clients = r#"{"s":10,"op":11,"d":{"user_ids":["101","202"]},"extra":{"token":"synthetic-private-data"}}"#;
+    assert!(serde_json::from_str::<songbird::model::Event>(clients).is_err());
+    assert!(matches!(
+        songbird::decode_dave_json(clients, &trace).unwrap(),
+        songbird::model::Event::ClientsConnect(_)
+    ));
+    for heartbeat in [r#"{"op":6,"d":1,"s":11}"#, r#"{"d":1,"op":6,"s":11}"#] {
+        assert!(matches!(
+            songbird::decode_dave_json(heartbeat, &trace).unwrap(),
+            songbird::model::Event::HeartbeatAck(_)
+        ));
+    }
+    assert!(!trace.trace().contains("synthetic-private-data"));
+}
+
+// Synthetic peer packets exercise the real UDP packet processor without a socket,
+// device, credential or captured audio. The clear RTP extension preamble is AAD;
+// extension contents, DAVE frame and RTP padding are transport-encrypted.
+fn encrypted_voice_rtp(
+    mode: songbird::driver::CryptoMode,
+    body: &[u8],
+    extension: bool,
+    padding: &[u8],
+) -> Vec<u8> {
+    use aes_gcm::{AeadInPlace, KeyInit};
+    use songbird::driver::CryptoMode;
+
+    let mut header = vec![
+        0x80 | (u8::from(extension) << 4) | (u8::from(!padding.is_empty()) << 5),
+        120,
+    ];
+    header.extend_from_slice(&1_u16.to_be_bytes());
+    header.extend_from_slice(&960_u32.to_be_bytes());
+    header.extend_from_slice(&77_u32.to_be_bytes());
+    let mut ciphertext = vec![];
+    if extension {
+        header.extend_from_slice(&[0xbe, 0xde, 0, 1]);
+        ciphertext.extend_from_slice(&[0x10, 0x7f, 0, 0]);
+    }
+    ciphertext.extend_from_slice(body);
+    ciphertext.extend_from_slice(padding);
+    let tag = match mode {
+        CryptoMode::Aes256Gcm => {
+            let mut nonce = aes_gcm::Nonce::default();
+            nonce[..4].copy_from_slice(&1_u32.to_be_bytes());
+            aes_gcm::Aes256Gcm::new_from_slice(&[7; 32])
+                .unwrap()
+                .encrypt_in_place_detached(&nonce, &header, &mut ciphertext)
+                .unwrap()
+                .to_vec()
+        }
+        CryptoMode::XChaCha20Poly1305 => {
+            let mut nonce = chacha20poly1305::XNonce::default();
+            nonce[..4].copy_from_slice(&1_u32.to_be_bytes());
+            chacha20poly1305::XChaCha20Poly1305::new_from_slice(&[7; 32])
+                .unwrap()
+                .encrypt_in_place_detached(&nonce, &header, &mut ciphertext)
+                .unwrap()
+                .to_vec()
+        }
+        _ => panic!("unsupported fixture mode"),
+    };
+    header.extend(ciphertext);
+    header.extend(tag);
+    header.extend_from_slice(&1_u32.to_be_bytes());
+    header
+}
+
+#[tokio::test]
+async fn received_dave_opus_survives_transport_and_playout_without_trailing_ciphertext() {
+    use songbird::{
+        Config,
+        driver::{
+            Channels, CryptoMode, DecodeConfig, DecodeMode, ReceiveHarness, SampleRate, opus,
+        },
+        packet::Packet,
+    };
+    use std::{num::NonZeroU8, sync::atomic::Ordering};
+
+    let samples: Vec<i16> = (0..960)
+        .map(|i| (12_000.0 * (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin()) as i16)
+        .collect();
+    let mut encoder =
+        opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio).unwrap();
+    let mut encoded = vec![0; 1276];
+    let len = encoder.encode(&samples, &mut encoded).unwrap();
+    encoded.truncate(len);
+    let mut reference = opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap();
+    let mut expected = vec![0; 1920];
+    assert_eq!(
+        reference.decode(&encoded, &mut expected, false).unwrap(),
+        960
+    );
+    assert!(expected.iter().any(|s| s.unsigned_abs() > 1000));
+
+    for mode in [CryptoMode::Aes256Gcm, CryptoMode::XChaCha20Poly1305] {
+        for (extension, padding) in [(false, 0), (true, 0), (false, 8), (true, 8)] {
+            let mut group = OfflineGroup::new();
+            let dave = group.alice.encrypt_opus(&encoded).unwrap();
+            let mut rtp_padding = vec![0; usize::from(padding)];
+            if let Some(last) = rtp_padding.last_mut() {
+                *last = padding;
+            }
+            let packet = encrypted_voice_rtp(mode, &dave, extension, &rtp_padding);
+            let mut config = Config::default()
+                .decode_mode(DecodeMode::Decode(DecodeConfig::new(
+                    Channels::Stereo,
+                    SampleRate::Hz48000,
+                )))
+                .playout_buffer_length(NonZeroU8::new(1).unwrap());
+            config.require_dave = true;
+            config.dave_ready.store(true, Ordering::Release);
+            let mut receiver = ReceiveHarness::new(mode, &[7; 32], config, group.bob);
+            receiver.map_ssrc(77, 101);
+            receiver.receive(&packet).await;
+            let voice = receiver
+                .voice_tick(77)
+                .expect("authenticated Opus must decode")
+                .expect("received peer must reach the playout buffer");
+            let pcm = voice.decoded_voice.expect("decode mode must return PCM");
+            assert_eq!(pcm.len(), expected.len());
+            assert!(
+                pcm == expected,
+                "buffered decode differs from exact Opus: {mode:?}, extension={extension}, padding={padding}"
+            );
+            let metadata = voice.packet.unwrap();
+            let rtp = metadata.rtp();
+            let body = rtp.payload();
+            assert_eq!(metadata.payload_offset, if extension { 8 } else { 0 });
+            assert_eq!(
+                metadata.payload_end_pad,
+                20 + usize::from(padding) + dave.len() - encoded.len()
+            );
+            assert_eq!(
+                &body[metadata.payload_offset..body.len() - metadata.payload_end_pad],
+                encoded
+            );
+            receiver.receive(&packet).await;
+            assert!(
+                receiver.voice_tick(77).unwrap().is_none(),
+                "DAVE replay reached playout"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn receive_pipeline_rejects_unauthenticated_unready_and_malformed_media() {
+    use songbird::{
+        Config,
+        driver::{CryptoMode, DecodeMode, ReceiveHarness},
+    };
+    use std::{num::NonZeroU8, sync::atomic::Ordering};
+
+    for mode in [CryptoMode::Aes256Gcm, CryptoMode::XChaCha20Poly1305] {
+        for case in [
+            "transport",
+            "dave",
+            "plaintext",
+            "unready",
+            "unknown_ssrc",
+            "wrong_user",
+            "padding_zero",
+            "padding_oversized",
+            "truncated",
+        ] {
+            let mut group = OfflineGroup::new();
+            let mut body = group
+                .alice
+                .encrypt_opus(&[0xf8, 0xff, 0xfe])
+                .unwrap()
+                .into_owned();
+            match case {
+                "dave" => body[0] ^= 0x40,
+                "plaintext" => body = vec![0xf8, 0xff, 0xfe],
+                _ => {}
+            }
+            let padding: &[u8] = match case {
+                "padding_zero" => &[0],
+                "padding_oversized" => &[255],
+                _ => &[],
+            };
+            let mut packet = encrypted_voice_rtp(mode, &body, false, padding);
+            match case {
+                "transport" => packet[12] ^= 0x40,
+                "truncated" => packet.truncate(13),
+                _ => {}
+            }
+            let mut config = Config::default()
+                .decode_mode(DecodeMode::Decode(Default::default()))
+                .playout_buffer_length(NonZeroU8::new(1).unwrap());
+            config.require_dave = true;
+            config
+                .dave_ready
+                .store(case != "unready", Ordering::Release);
+            let mut receiver = ReceiveHarness::new(mode, &[7; 32], config, group.bob);
+            if case != "unknown_ssrc" {
+                receiver.map_ssrc(77, if case == "wrong_user" { 999 } else { 101 });
+            }
+            receiver.receive(&packet).await;
+            assert!(
+                receiver.voice_tick(77).unwrap().is_none(),
+                "rejected {case} packet reached playout under {mode:?}"
+            );
+        }
+    }
 }

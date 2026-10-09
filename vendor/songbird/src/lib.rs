@@ -80,6 +80,12 @@
 )]
 
 mod config;
+#[cfg(feature = "driver")]
+mod dave_handshake;
+mod dave_wire;
+#[cfg(feature = "driver")]
+pub use dave_handshake::{DaveHandshake, DaveStage};
+pub use dave_wire::{decode_dave_binary, decode_dave_json, key_package_frame};
 pub mod constants;
 #[cfg(feature = "driver")]
 pub mod driver;

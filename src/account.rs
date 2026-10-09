@@ -2,6 +2,7 @@
 //! This is not Discord's bot API, an approved OAuth integration, or a promise of account safety.
 use crate::messaging::{self, ChatMessage, TextChannel};
 use crate::model::{Account, Channel, Guild};
+use crate::social::{self, DirectChannel, Friend};
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -16,6 +17,15 @@ pub struct PersonalAccount {
     token: Zeroizing<String>,
     http: reqwest::Client,
 }
+#[derive(Debug)]
+pub struct AuthenticationRejected;
+impl std::fmt::Display for AuthenticationRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Discord rejected this login. Sign in again.")
+    }
+}
+impl std::error::Error for AuthenticationRejected {}
+
 impl PersonalAccount {
     pub async fn connect(
         token: String,
@@ -37,6 +47,7 @@ impl PersonalAccount {
         let client = Self { token, http };
         let user = client.get("/users/@me").await?;
         let account = Account {
+            avatar: crate::profiles::hash(&user["avatar"]),
             id: snowflake(&user["id"]).context("Account response had no valid user ID")?,
             name: display_name(&user),
         };
@@ -48,6 +59,7 @@ impl PersonalAccount {
             .take(250)
             .filter_map(|v| {
                 Some(Guild {
+                    icon: crate::profiles::hash(&v["icon"]),
                     id: snowflake(&v["id"])?,
                     name: v["name"].as_str()?.to_owned(),
                 })
@@ -77,11 +89,13 @@ impl PersonalAccount {
             anyhow::anyhow!("Discord request failed; its outcome may be uncertain.")
         })?;
         match response.status().as_u16() {
-            401 | 403 => {
+            401 => return Err(AuthenticationRejected.into()),
+            403 => {
                 bail!("Discord denied account or channel access. No retry or bypass was attempted.")
             }
             429 => bail!("Discord rate limited the request. Wait before trying again."),
-            200 => {}
+            200 | 201 => {}
+            204 => return Ok(Value::Null),
             _ => bail!(
                 "Discord request failed with HTTP {}",
                 response.status().as_u16()
@@ -105,6 +119,57 @@ impl PersonalAccount {
         }
         serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("Discord returned an invalid response."))
+    }
+    /// One bounded snapshot; never sends friend requests or changes relationships.
+    pub async fn friends(&self) -> Result<Vec<Friend>> {
+        social::parse_friends(&self.get("/users/@me/relationships").await?)
+    }
+    pub async fn direct_channels(&self) -> Result<social::DirectChannelsSnapshot> {
+        social::parse_direct_channels(&self.get("/users/@me/channels").await?)
+    }
+    /// Only from selecting a friend. Reuses an existing DM when present.
+    pub async fn open_dm(&self, user_id: u64) -> Result<DirectChannel> {
+        messaging::validate_id(user_id)?;
+        let value = self
+            .request(
+                reqwest::Method::POST,
+                "/users/@me/channels",
+                Some(json!({"recipient_id": user_id.to_string()})),
+            )
+            .await?;
+        let channel = social::parse_direct_channel(&value)?;
+        if value["type"].as_u64() != Some(1)
+            || channel.recipients.len() != 1
+            || channel.recipients[0].id != user_id
+        {
+            bail!("Discord returned a different conversation than requested.");
+        }
+        Ok(channel)
+    }
+    /// An explicit Call action may ring these recipients only after a call exists.
+    /// No automatic ring, retry or arbitrary recipient notifications.
+    pub async fn ring(&self, channel_id: u64, recipient_ids: &[u64]) -> Result<()> {
+        messaging::validate_id(channel_id)?;
+        let recipients = ring_payload(recipient_ids)?;
+        self.request(
+            reqwest::Method::POST,
+            &format!("/channels/{channel_id}/call/ring"),
+            Some(recipients),
+        )
+        .await?;
+        Ok(())
+    }
+    /// One best-effort cancellation of the recipients of our explicit call.
+    pub async fn stop_ringing(&self, channel_id: u64, recipient_ids: &[u64]) -> Result<()> {
+        messaging::validate_id(channel_id)?;
+        let recipients = ring_payload(recipient_ids)?;
+        self.request(
+            reqwest::Method::POST,
+            &format!("/channels/{channel_id}/call/stop-ringing"),
+            Some(recipients),
+        )
+        .await?;
+        Ok(())
     }
     pub async fn text_channels(&self, guild_id: u64) -> Result<Vec<TextChannel>> {
         messaging::validate_id(guild_id)?;
@@ -181,6 +246,14 @@ pub enum GatewayCommand {
         muted: bool,
         deafened: bool,
     },
+    PrivateVoice {
+        channel_id: Option<u64>,
+        muted: bool,
+        deafened: bool,
+    },
+    RequestCall {
+        channel_id: u64,
+    },
     Close,
 }
 #[derive(Clone)]
@@ -201,6 +274,9 @@ pub enum GatewayEvent {
     Ready {
         resumed: bool,
     },
+    SelfPresence(crate::profiles::Presence),
+    RosterBegin(u64),
+    RosterComplete(u64, bool),
     Dispatch {
         kind: String,
         data: Value,
@@ -208,6 +284,7 @@ pub enum GatewayEvent {
     Closed {
         message: String,
         retryable: bool,
+        auth_rejected: bool,
         resume: Option<GatewayResume>,
     },
 }
@@ -228,8 +305,9 @@ impl Gateway {
         let task = tokio::spawn(async move {
             let mut session = resume;
             if let Err(error) = gateway_loop(token, rx, event_tx.clone(), &mut session).await {
-                let retryable =
-                    error.downcast_ref::<TerminalGateway>().is_none() && session.is_some();
+                let retryable = error.downcast_ref::<TerminalGateway>().is_none()
+                    && error.downcast_ref::<AuthenticationRejected>().is_none()
+                    && session.is_some();
                 let _ = event_tx
                     .send(GatewayEvent::Closed {
                         message: if retryable {
@@ -239,6 +317,7 @@ impl Gateway {
                         }
                         .into(),
                         retryable,
+                        auth_rejected: error.downcast_ref::<AuthenticationRejected>().is_some(),
                         resume: if retryable { session } else { None },
                     })
                     .await;
@@ -332,6 +411,32 @@ async fn gateway_loop(
                     let update = json!({"op":4,"d":{"guild_id":guild_id.to_string(),"channel_id":channel_id.map(|id|id.to_string()),"self_mute":muted,"self_deaf":deafened}});
                     write.send(Message::Text(update.to_string().into())).await?;
                 }
+                Some(GatewayCommand::PrivateVoice {
+                    channel_id,
+                    muted,
+                    deafened,
+                }) => {
+                    if channel_id == Some(0) {
+                        bail!("Choose a valid conversation.");
+                    }
+                    write
+                        .send(Message::Text(
+                            private_voice_payload(channel_id, muted, deafened)
+                                .to_string()
+                                .into(),
+                        ))
+                        .await?;
+                }
+                Some(GatewayCommand::RequestCall { channel_id }) => {
+                    messaging::validate_id(channel_id)?;
+                    write
+                        .send(Message::Text(
+                            json!({"op":13,"d":{"channel_id":channel_id.to_string()}})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await?;
+                }
                 Some(GatewayCommand::Close) | None => {
                     let _ = write.close().await;
                     return Ok(());
@@ -378,9 +483,16 @@ async fn gateway_loop(
                                         return Err(TerminalGateway.into());
                                     }
                                     events.send(GatewayEvent::Ready { resumed: false }).await?;
+                                    events
+                                        .send(GatewayEvent::SelfPresence(
+                                            crate::profiles::self_presence(&v["d"]["sessions"]),
+                                        ))
+                                        .await?;
+                                    emit_presences(&v["d"], &events).await?;
                                     if let Some(guilds) = v["d"]["guilds"].as_array() {
                                         for guild in guilds.iter().take(250) {
                                             emit_initial_voice_states(guild, &events).await?;
+                                            emit_presences(guild, &events).await?;
                                         }
                                     }
                                 }
@@ -389,10 +501,20 @@ async fn gateway_loop(
                                 }
                                 if kind == "GUILD_CREATE" {
                                     emit_initial_voice_states(&v["d"], &events).await?;
+                                    emit_presences(&v["d"], &events).await?;
+                                }
+                                if kind == "SESSIONS_REPLACE" {
+                                    events
+                                        .send(GatewayEvent::SelfPresence(
+                                            crate::profiles::self_presence(&v["d"]),
+                                        ))
+                                        .await?;
                                 }
                                 if matches!(
                                     kind,
-                                    "VOICE_STATE_UPDATE"
+                                    "PRESENCE_UPDATE"
+                                        | "USER_UPDATE"
+                                        | "VOICE_STATE_UPDATE"
                                         | "VOICE_SERVER_UPDATE"
                                         | "GUILD_DELETE"
                                         | "CHANNEL_DELETE"
@@ -401,6 +523,16 @@ async fn gateway_loop(
                                         | "GUILD_ROLE_UPDATE"
                                         | "GUILD_ROLE_DELETE"
                                         | "GUILD_UPDATE"
+                                        | "CALL_CREATE"
+                                        | "CALL_UPDATE"
+                                        | "CALL_DELETE"
+                                        | "RELATIONSHIP_ADD"
+                                        | "RELATIONSHIP_UPDATE"
+                                        | "RELATIONSHIP_REMOVE"
+                                        | "CHANNEL_CREATE"
+                                        | "MESSAGE_CREATE"
+                                        | "MESSAGE_UPDATE"
+                                        | "MESSAGE_DELETE"
                                 ) {
                                     events
                                         .send(GatewayEvent::Dispatch {
@@ -415,6 +547,9 @@ async fn gateway_loop(
                     }
                     Message::Ping(v) => write.send(Message::Pong(v)).await?,
                     Message::Close(frame) => {
+                        if frame.as_ref().is_some_and(|f| u16::from(f.code) == 4004) {
+                            return Err(AuthenticationRejected.into());
+                        }
                         if !gateway_close_is_retryable(frame.as_ref().map(|f| u16::from(f.code))) {
                             return Err(TerminalGateway.into());
                         }
@@ -425,6 +560,24 @@ async fn gateway_loop(
             }
         }
     }
+}
+// Reverse-engineered private call protocol: guild_id must remain JSON null.
+fn private_voice_payload(channel_id: Option<u64>, muted: bool, deafened: bool) -> Value {
+    json!({"op":4,"d":{"guild_id":null,"channel_id":channel_id.map(|id|id.to_string()),
+        "self_mute":muted,"self_deaf":deafened}})
+}
+fn ring_payload(recipient_ids: &[u64]) -> Result<Value> {
+    if recipient_ids.is_empty() || recipient_ids.len() > 25 {
+        bail!("Choose the call recipients before ringing.");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in recipient_ids {
+        messaging::validate_id(*id)?;
+        if !seen.insert(*id) {
+            bail!("Call recipients must be unique.");
+        }
+    }
+    Ok(json!({"recipients":recipient_ids.iter().map(u64::to_string).collect::<Vec<_>>()}))
 }
 fn validated_resume_url(value: Option<&str>) -> Option<String> {
     let url = reqwest::Url::parse(value?).ok()?;
@@ -459,6 +612,11 @@ async fn emit_initial_voice_states(
     let Some(states) = guild["voice_states"].as_array() else {
         return Ok(());
     };
+    events.send(GatewayEvent::RosterBegin(guild_id)).await?;
+    let complete = states.len() <= 250
+        && states
+            .iter()
+            .all(|v| snowflake(&v["user_id"]).is_some() && snowflake(&v["channel_id"]).is_some());
     for state in states.iter().take(250) {
         let mut state = state.clone();
         state["guild_id"] = Value::String(guild_id.to_string());
@@ -479,11 +637,51 @@ async fn emit_initial_voice_states(
             })
             .await?;
     }
+    events
+        .send(GatewayEvent::RosterComplete(guild_id, complete))
+        .await?;
     Ok(())
 }
+async fn emit_presences(data: &Value, events: &mpsc::Sender<GatewayEvent>) -> Result<()> {
+    let lists = [
+        data.get("presences"),
+        data.get("merged_presences").and_then(|m| m.get("friends")),
+    ];
+    for list in lists.into_iter().flatten().filter_map(Value::as_array) {
+        for p in list.iter().take(1000) {
+            if let Some(id) = snowflake(&p["user"]["id"]) {
+                // Retain neither activities nor session identifiers. Partial
+                // presence users must not erase an existing avatar.
+                let mut user = json!({"id":id.to_string()});
+                if let Some(avatar) = p["user"].get("avatar") {
+                    user["avatar"] = avatar.clone();
+                }
+                events
+                    .send(GatewayEvent::Dispatch {
+                        kind: "PRESENCE_UPDATE".into(),
+                        data: json!({"user":user,"status":p["status"]}),
+                    })
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_calls_do_not_impersonate_guild_voice_or_ring_everyone() {
+        let payload = private_voice_payload(Some(42), true, false);
+        assert!(payload["d"]["guild_id"].is_null());
+        assert_eq!(payload["d"]["channel_id"], "42");
+        assert!(private_voice_payload(None, true, true)["d"]["channel_id"].is_null());
+        assert_eq!(ring_payload(&[42]).unwrap(), json!({"recipients":["42"]}));
+        for recipients in [vec![], vec![0], vec![42, 42], vec![1; 26]] {
+            assert!(ring_payload(&recipients).is_err());
+        }
+    }
     #[test]
     fn snowflakes_reject_zero_and_garbage() {
         assert_eq!(snowflake(&json!("123")), Some(123));

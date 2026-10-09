@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 VERSION=0.01
-APP=dist/Fastdistord.app
+APP=dist/latest/Fastdistord.app
 [ -d "$APP" ] || { echo 'Build the Mac bundle first.' >&2; exit 1; }
 [ "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" = 0.0.1 ]
 codesign --verify --deep --strict "$APP"

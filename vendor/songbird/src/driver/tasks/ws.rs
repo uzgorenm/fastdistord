@@ -54,6 +54,7 @@ pub(crate) struct AuxNetwork {
     dave_session: Arc<RwLock<Option<davey::DaveSession>>>,
     dave_protocol_version: Arc<AtomicU16>,
     dave_pending_transitions: HashMap<u16, u16>,
+    dave_external_sender: Option<Vec<u8>>,
     recognized_user_ids: HashSet<UserId>,
 
     #[cfg(feature = "receive")]
@@ -96,6 +97,7 @@ impl AuxNetwork {
             dave_session,
             dave_protocol_version,
             dave_pending_transitions: HashMap::new(),
+            dave_external_sender: None,
             recognized_user_ids,
 
             #[cfg(feature = "receive")]
@@ -105,6 +107,9 @@ impl AuxNetwork {
 
     #[instrument(skip(self))]
     async fn run(&mut self, interconnect: &mut Interconnect) {
+        self.config
+            .dave_handshake
+            .record(crate::DaveStage::VoiceLoopStarted, 0);
         let mut next_heartbeat = Instant::now() + self.heartbeat_interval;
 
         loop {
@@ -243,9 +248,15 @@ impl AuxNetwork {
         trace!("Sent heartbeat {:?}", self.speaking);
 
         if !self.dont_send {
+            self.config
+                .dave_handshake
+                .record(crate::DaveStage::HeartbeatSending, 0);
             self.ws_client
                 .send_json(&GatewayEvent::from(Heartbeat { nonce }))
                 .await?;
+            self.config
+                .dave_handshake
+                .record(crate::DaveStage::HeartbeatSent, 0);
         }
 
         Ok(())
@@ -256,6 +267,16 @@ impl AuxNetwork {
         interconnect: &Interconnect,
         value: GatewayEvent,
     ) -> Result<(), WsError> {
+        let handled_opcode = match &value {
+            GatewayEvent::HeartbeatAck(_) => 6,
+            GatewayEvent::ClientsConnect(_) => 11,
+            GatewayEvent::ClientDisconnect(_) => 13,
+            GatewayEvent::DaveMlsExternalSender(_) => 25,
+            GatewayEvent::DaveMlsProposals(_) => 27,
+            GatewayEvent::DaveMlsAnnounceCommitTransition(_) => 29,
+            GatewayEvent::DaveMlsWelcome(_) => 30,
+            _ => 0,
+        };
         match value {
             GatewayEvent::Speaking(ev) => {
                 #[cfg(feature = "receive")]
@@ -278,6 +299,10 @@ impl AuxNetwork {
                 }
 
                 self.recognized_user_ids.remove(&ev.user_id);
+                self.config.dave_handshake.record(
+                    crate::DaveStage::Peers,
+                    self.recognized_user_ids.len().min(u16::MAX as usize) as u16,
+                );
 
                 drop(interconnect.events.send(EventMessage::FireCoreEvent(
                     CoreContext::ClientDisconnect(ev),
@@ -285,17 +310,22 @@ impl AuxNetwork {
             }
             GatewayEvent::ClientsConnect(ev) => {
                 self.recognized_user_ids.extend(&ev.user_ids);
+                self.config.dave_handshake.record(
+                    crate::DaveStage::Peers,
+                    self.recognized_user_ids.len().min(u16::MAX as usize) as u16,
+                );
             }
             GatewayEvent::HeartbeatAck(ev) => {
-                if let Some(nonce) = self.last_heartbeat_nonce.take() {
-                    if ev.nonce == nonce {
-                        trace!("Heartbeat ACK received.");
-                    } else {
-                        warn!(
-                            "Heartbeat nonce mismatch! Expected {}, saw {}.",
-                            nonce, ev.nonce
-                        );
-                    }
+                let outcome = match self.last_heartbeat_nonce.take() {
+                    Some(nonce) if ev.nonce == nonce => 1,
+                    Some(_) => 2,
+                    None => 0,
+                };
+                self.config
+                    .dave_handshake
+                    .record(crate::DaveStage::HeartbeatAck, outcome);
+                if outcome == 2 {
+                    warn!("Voice heartbeat acknowledgement did not match the pending heartbeat");
                 }
             }
             GatewayEvent::DavePrepareTransition(ev) => {
@@ -325,6 +355,9 @@ impl AuxNetwork {
                 self.execute_dave_transition(ev.transition_id);
             }
             GatewayEvent::DavePrepareEpoch(ev) if ev.epoch == 1 => {
+                self.config
+                    .dave_handshake
+                    .record(crate::DaveStage::Epoch, ev.protocol_version);
                 self.config.invalidate_dave();
                 self.dave_transition_active = false;
                 self.dave_protocol_version
@@ -332,19 +365,45 @@ impl AuxNetwork {
                 match self.reinit_dave_session().await {
                     Err(DaveReinitError::Ws(e)) => return Err(e),
                     Err(e) => {
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::MlsFailed, 24);
                         warn!(error = ?e, "failed to reinitialize DAVE session");
                     }
                     _ => {}
                 }
             }
             GatewayEvent::DaveMlsExternalSender(ev) => {
+                if ev.external_sender.len() > 4096 {
+                    self.config.invalidate_dave();
+                    self.config
+                        .dave_handshake
+                        .record(crate::DaveStage::MlsFailed, 25);
+                    return Ok(());
+                }
                 if let Some(ref mut dave_session) = *self.dave_session.write().unwrap() {
                     if let Err(e) = dave_session.set_external_sender(&ev.external_sender) {
+                        self.config.invalidate_dave();
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::MlsFailed, 25);
                         warn!(error = ?e, "error setting MLS external sender");
+                    } else {
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::ExternalSender, 25);
+                        self.dave_external_sender = Some(ev.external_sender);
                     }
+                } else {
+                    // Version zero may precede a later PrepareEpoch. Preserve
+                    // the bounded public sender package instead of losing it.
+                    self.dave_external_sender = Some(ev.external_sender);
                 }
             }
             GatewayEvent::DaveMlsProposals(ev) => {
+                self.config
+                    .dave_handshake
+                    .record(crate::DaveStage::Proposals, 27);
                 let operation_type = match ev.operation_type {
                     DaveMlsProposalsOperationType::Append => davey::ProposalsOperationType::APPEND,
                     DaveMlsProposalsOperationType::Revoke => davey::ProposalsOperationType::REVOKE,
@@ -362,13 +421,27 @@ impl AuxNetwork {
                                 .collect::<Vec<_>>(),
                         ),
                     ) {
-                        Ok(result) => result,
+                        Ok(result) => {
+                            if result.is_none() {
+                                self.config
+                                    .dave_handshake
+                                    .record(crate::DaveStage::ProposalsPending, 27);
+                            }
+                            result
+                        }
                         Err(e) => {
+                            self.config.invalidate_dave();
+                            self.config
+                                .dave_handshake
+                                .record(crate::DaveStage::MlsFailed, 27);
                             warn!(error = ?e, "error processing MLS proposals");
                             None
                         }
                     }
                 } else {
+                    self.config
+                        .dave_handshake
+                        .record(crate::DaveStage::ProposalsWithoutSession, 27);
                     None
                 };
 
@@ -379,6 +452,9 @@ impl AuxNetwork {
                             welcome: commit_welcome.welcome,
                         }))
                         .await?;
+                    self.config
+                        .dave_handshake
+                        .record(crate::DaveStage::CommitSent, 28);
                 }
             }
             GatewayEvent::DaveMlsAnnounceCommitTransition(ev) => {
@@ -386,6 +462,9 @@ impl AuxNetwork {
                 self.dave_transition_active = false;
                 match self.dave_process_commit(&ev.commit_message) {
                     Some(Ok(())) if ev.transition_id != 0 => {
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::CommitAccepted, ev.transition_id);
                         let protocol_version = self.dave_protocol_version.load(Ordering::Relaxed);
 
                         self.dave_pending_transitions
@@ -396,8 +475,15 @@ impl AuxNetwork {
                                 protocol_version,
                             }))
                             .await?;
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::TransitionAck, ev.transition_id);
                     }
                     Some(Err(e)) => {
+                        self.config.invalidate_dave();
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::MlsFailed, ev.transition_id);
                         warn!("MLS commit errored: {e:?}");
                         self.ws_client
                             .send_json(&GatewayEvent::from(DaveMlsInvalidCommitWelcome {
@@ -412,7 +498,15 @@ impl AuxNetwork {
                             _ => {}
                         }
                     }
-                    Some(Ok(())) => self.dave_transition_active = true,
+                    Some(Ok(())) => {
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::CommitAccepted, 0);
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::TransitionExecuted, 0);
+                        self.dave_transition_active = true;
+                    }
                     None => {}
                 }
             }
@@ -421,6 +515,9 @@ impl AuxNetwork {
                 self.dave_transition_active = false;
                 match self.dave_process_welcome(&ev.welcome) {
                     Some(Ok(())) if ev.transition_id != 0 => {
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::WelcomeAccepted, ev.transition_id);
                         let protocol_version = self.dave_protocol_version.load(Ordering::Relaxed);
 
                         self.dave_pending_transitions
@@ -431,9 +528,16 @@ impl AuxNetwork {
                                 protocol_version,
                             }))
                             .await?;
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::TransitionAck, ev.transition_id);
                     }
 
                     Some(Err(e)) => {
+                        self.config.invalidate_dave();
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::MlsFailed, ev.transition_id);
                         warn!("MLS welcome errored: {e:?}");
                         self.ws_client
                             .send_json(&GatewayEvent::from(DaveMlsInvalidCommitWelcome {
@@ -448,7 +552,15 @@ impl AuxNetwork {
                             _ => {}
                         }
                     }
-                    Some(Ok(())) => self.dave_transition_active = true,
+                    Some(Ok(())) => {
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::WelcomeAccepted, 0);
+                        self.config
+                            .dave_handshake
+                            .record(crate::DaveStage::TransitionExecuted, 0);
+                        self.dave_transition_active = true;
+                    }
                     None => {}
                 }
             }
@@ -458,19 +570,23 @@ impl AuxNetwork {
         }
 
         self.refresh_dave_ready();
+        self.config
+            .dave_handshake
+            .record(crate::DaveStage::VoiceEventHandled, handled_opcode);
         Ok(())
     }
 
     fn refresh_dave_ready(&self) {
-        let ready = crate::driver::dave_policy::negotiated_ready(
-            self.dave_transition_active,
-            self.dave_protocol_version.load(Ordering::Acquire),
-            self.dave_session
-                .read()
-                .map(|session| session.as_ref().is_some_and(|s| s.is_ready()))
-                .unwrap_or(false),
-            !self.dont_send,
-        );
+        let ready = !self.config.dave_handshake.failed()
+            && crate::driver::dave_policy::negotiated_ready(
+                self.dave_transition_active,
+                self.dave_protocol_version.load(Ordering::Acquire),
+                self.dave_session
+                    .read()
+                    .map(|session| session.as_ref().is_some_and(|s| s.is_ready()))
+                    .unwrap_or(false),
+                !self.dont_send,
+            );
         self.config.publish_dave_ready(ready);
     }
 
@@ -510,6 +626,18 @@ impl AuxNetwork {
                 } else {
                     let mut dave_session =
                         davey::DaveSession::new(dave_protocol_version, user_id, channel_id, None)?;
+                    if let Some(sender) = &self.dave_external_sender {
+                        if dave_session.set_external_sender(sender).is_err() {
+                            self.config.invalidate_dave();
+                            self.config
+                                .dave_handshake
+                                .record(crate::DaveStage::MlsFailed, 25);
+                        } else {
+                            self.config
+                                .dave_handshake
+                                .record(crate::DaveStage::ExternalSender, 25);
+                        }
+                    }
                     let key_package = dave_session.create_key_package()?;
 
                     *self.dave_session.write().unwrap() = Some(dave_session);
@@ -522,6 +650,9 @@ impl AuxNetwork {
                     key_package,
                 }))
                 .await?;
+            self.config
+                .dave_handshake
+                .record(crate::DaveStage::KeyPackage, 26);
         } else if let Some(ref mut dave_session) = *self.dave_session.write().unwrap() {
             dave_session.reset()?;
             if !self.config.require_dave {
@@ -551,6 +682,9 @@ impl AuxNetwork {
             }
         }
 
+        self.config
+            .dave_handshake
+            .record(crate::DaveStage::TransitionExecuted, transition_id);
         self.dave_transition_active = new_version != 0;
         self.dave_pending_transitions.remove(&transition_id);
     }
@@ -558,6 +692,9 @@ impl AuxNetwork {
 
 impl Drop for AuxNetwork {
     fn drop(&mut self) {
+        self.config
+            .dave_handshake
+            .record(crate::DaveStage::VoiceLoopStopped, 0);
         self.config.invalidate_dave();
     }
 }

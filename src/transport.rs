@@ -2,7 +2,7 @@
 //! The small vendored Songbird patch is mandatory: upstream's DriverConnect does not
 //! imply DAVE readiness, and upstream permits transport-only audio during negotiation.
 use crate::audio::{AudioConfig, AudioEngine, PlaybackSink, TxGate};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use songbird::{
     Config, ConnectionInfo, CoreEvent, Driver, Event, EventContext, EventHandler,
@@ -32,7 +32,8 @@ const DISARMED_EPOCH: u64 = u64::MAX;
 /// The endpoint/token/session must come from this user's current Gateway session.
 #[derive(Clone)]
 pub struct VoiceConnection {
-    pub guild_id: u64,
+    /// None for private calls; their voice server ID is the channel ID.
+    pub guild_id: Option<u64>,
     pub channel_id: u64,
     pub user_id: u64,
     pub session_id: String,
@@ -57,6 +58,7 @@ impl fmt::Debug for VoiceConnection {
 pub enum TransportEvent {
     /// Both the voice connection and negotiated DAVE session are ready.
     Ready,
+    Waiting,
     Disconnected {
         message: String,
         retryable: bool,
@@ -91,7 +93,8 @@ impl std::error::Error for TransientVoiceFailure {}
 /// Owns a single call. Dropping it closes privacy gates before stopping its workers.
 pub struct Transport {
     driver: Driver,
-    audio: Arc<AudioEngine>,
+    audio: Arc<OnceLock<Arc<AudioEngine>>>,
+    audio_config: Arc<Mutex<AudioConfig>>,
     gate: Arc<TxGate>,
     alive: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
@@ -104,10 +107,12 @@ impl Transport {
         config: AudioConfig,
         events: UnboundedSender<TransportEvent>,
         expected_session: u64,
+        handshake: Arc<songbird::DaveHandshake>,
     ) -> Result<Self> {
         if gate.session() != expected_session {
             bail!("Voice connection was superseded");
         }
+        handshake.begin();
         let connection = checked_connection(info)?;
         let armed_epoch = Arc::new(AtomicU64::new(DISARMED_EPOCH));
         let dave_ready = Arc::new(AtomicBool::new(false));
@@ -120,6 +125,15 @@ impl Transport {
             )))
             .mix_mode(MixMode::Mono);
         voice_config.require_dave = true;
+        voice_config.dave_handshake = handshake.clone();
+        voice_config.dave_gate = Some({
+            let gate = gate.clone();
+            Arc::new(move |ready| {
+                if gate.session() == expected_session {
+                    gate.set_encryption_pending(!ready);
+                }
+            })
+        });
         voice_config.dave_ready = dave_ready.clone();
         voice_config.driver_timeout = Some(Duration::from_secs(10).into());
         voice_config.packet_gate = Some({
@@ -134,8 +148,7 @@ impl Transport {
             })
         });
         let mut pending = PendingDriver {
-            driver: Driver::new(voice_config),
-            armed: true,
+            driver: Some(Driver::new(voice_config)),
         };
         let transient_failure = Arc::new(AtomicBool::new(false));
         let status = DriverStatus {
@@ -144,7 +157,7 @@ impl Transport {
             events: events.clone(),
         };
         pending
-            .driver
+            .driver()
             .add_global_event(Event::Core(CoreEvent::DriverDisconnect), status);
 
         let playback = Arc::new(OnceLock::new());
@@ -162,10 +175,10 @@ impl Transport {
             CoreEvent::ClientDisconnect,
         ] {
             pending
-                .driver
+                .driver()
                 .add_global_event(Event::Core(event), receiver.clone());
         }
-        match timeout(HANDSHAKE_TIMEOUT, pending.driver.connect(connection)).await {
+        match timeout(HANDSHAKE_TIMEOUT, pending.driver().connect(connection)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 let reason = songbird::events::context_data::DisconnectReason::from(&error);
@@ -180,45 +193,17 @@ impl Transport {
             }
             Err(_) => return Err(TransientVoiceFailure.into()),
         }
-        // DriverConnect only means transport negotiation completed. Never expose it as ready.
-        timeout(DAVE_TIMEOUT, async {
-            while !dave_ready.load(Ordering::Acquire) {
-                if !alive.load(Ordering::Acquire) || gate.session() != expected_session {
-                    if gate.session() == expected_session
-                        && transient_failure.load(Ordering::Acquire)
-                    {
-                        return Err(TransientVoiceFailure.into());
-                    }
-                    bail!("Discord voice disconnected before end-to-end encryption was ready");
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("DAVE end-to-end encryption did not become ready; microphone stayed closed")??;
-
+        // Stay joined with capture closed while the sole member's MLS group
+        // is pending. Media startup belongs to the readiness monitor, not the
+        // transport handshake. No Davey readiness or ratchet is fabricated.
         if gate.session() != expected_session {
             bail!("Voice connection was superseded");
         }
-        // No audio device is opened until the MLS session has been verified ready.
-        let audio =
-            Arc::new(AudioEngine::start(config, gate.clone()).map_err(|_| AudioOpenFailure)?);
-        let _ = playback.set(audio.playback());
-        let _ = audio_health.set(audio.clone());
-        if !dave_ready.load(Ordering::Acquire)
-            || !alive.load(Ordering::Acquire)
-            || gate.session() != expected_session
-        {
-            bail!("End-to-end encryption changed during audio startup; reconnect to try again");
-        }
-        let driver = pending.driver.clone();
-        // Disarm the failure guard without creating a leaked Driver reference.
-        pending.armed = false;
-        drop(pending);
+        let driver = pending.into_driver();
         let mut transport = Self {
             driver,
-            audio,
+            audio: audio_health,
+            audio_config: Arc::new(Mutex::new(config)),
             gate,
             alive,
             monitor: None,
@@ -228,6 +213,9 @@ impl Transport {
             MonitorState {
                 expected_session,
                 audio: transport.audio.clone(),
+                audio_config: transport.audio_config.clone(),
+                playback,
+                handshake,
                 gate: transport.gate.clone(),
                 alive: transport.alive.clone(),
                 dave_ready,
@@ -235,10 +223,14 @@ impl Transport {
                 events: events.clone(),
             },
         ));
-        let _ = events.send(TransportEvent::Ready);
         Ok(transport)
     }
 
+    pub fn media_ready(&self) -> bool {
+        self.audio.get().is_some()
+            && self.alive.load(Ordering::Acquire)
+            && !self.gate.encryption_pending()
+    }
     pub fn mute(&mut self, muted: bool) {
         self.gate.set_muted(muted);
         self.driver.mute(muted || self.gate.is_deafened());
@@ -250,18 +242,34 @@ impl Transport {
     }
 
     pub fn set_output_volume(&mut self, volume: f32) {
-        self.audio.set_output_volume(volume);
+        if let Ok(mut config) = self.audio_config.lock() {
+            config.output_volume = volume;
+        }
+        if let Some(audio) = self.audio.get() {
+            audio.set_output_volume(volume);
+        }
     }
 
     pub fn device_config(&self) -> AudioConfig {
-        self.audio.device_config()
+        self.audio
+            .get()
+            .map(|audio| audio.device_config())
+            .unwrap_or_else(|| {
+                self.audio_config
+                    .lock()
+                    .map(|c| c.clone())
+                    .unwrap_or_default()
+            })
     }
     pub fn diagnostics(&self) -> String {
-        let stats = self.audio.stats();
+        let Some(audio) = self.audio.get() else {
+            return "Audio devices closed while encryption is pending".into();
+        };
+        let stats = audio.stats();
         format!(
             "Input {} Hz · Output {} Hz · Suppressed {} · Capture overruns {} · Playback overruns {} · Playback underruns {}",
-            self.audio.input_sample_rate,
-            self.audio.output_sample_rate,
+            audio.input_sample_rate,
+            audio.output_sample_rate,
             self.gate.is_suppressed(),
             stats.capture_overruns,
             stats.playback_overruns,
@@ -270,12 +278,14 @@ impl Transport {
     }
 
     pub fn meter(&self) -> f32 {
-        self.audio.meter()
+        self.audio.get().map_or(0.0, |audio| audio.meter())
     }
 
     pub fn shutdown(&mut self) {
         self.alive.store(false, Ordering::Release);
-        self.audio.stop();
+        if let Some(audio) = self.audio.get() {
+            audio.stop();
+        }
         self.driver.mute(true);
         self.driver.stop();
         self.driver.leave();
@@ -293,15 +303,29 @@ impl Drop for Transport {
 
 // A cancelled/failed connection future must not leave background voice tasks connected.
 struct PendingDriver {
-    driver: Driver,
-    armed: bool,
+    driver: Option<Driver>,
+}
+impl PendingDriver {
+    fn driver(&mut self) -> &mut Driver {
+        self.driver
+            .as_mut()
+            .expect("pending driver is owned until handoff")
+    }
+
+    fn into_driver(mut self) -> Driver {
+        // Songbird poisons its core whenever ANY Driver clone is dropped.
+        // Move the owner out so dropping this guard cannot kill the new transport.
+        self.driver
+            .take()
+            .expect("pending driver is owned until handoff")
+    }
 }
 impl Drop for PendingDriver {
     fn drop(&mut self) {
-        if self.armed {
-            self.driver.mute(true);
-            self.driver.stop();
-            self.driver.leave();
+        if let Some(driver) = &mut self.driver {
+            driver.mute(true);
+            driver.stop();
+            driver.leave();
         }
     }
 }
@@ -317,7 +341,10 @@ fn epoch_allows_transmit(gate: &TxGate, armed: &AtomicU64, expected_session: u64
 
 struct MonitorState {
     expected_session: u64,
-    audio: Arc<AudioEngine>,
+    audio: Arc<OnceLock<Arc<AudioEngine>>>,
+    audio_config: Arc<Mutex<AudioConfig>>,
+    playback: Arc<OnceLock<PlaybackSink>>,
+    handshake: Arc<songbird::DaveHandshake>,
     gate: Arc<TxGate>,
     alive: Arc<AtomicBool>,
     dave_ready: Arc<AtomicBool>,
@@ -325,10 +352,25 @@ struct MonitorState {
     events: UnboundedSender<TransportEvent>,
 }
 
+#[derive(Default)]
+struct EncryptionDeadline(Option<Instant>);
+impl EncryptionDeadline {
+    fn expired(&mut self, now: Instant, may_idle: bool) -> bool {
+        if may_idle {
+            self.0 = None;
+            return false;
+        }
+        now.duration_since(*self.0.get_or_insert(now)) >= DAVE_TIMEOUT
+    }
+}
+
 fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
     let MonitorState {
         expected_session,
         audio,
+        audio_config,
+        playback,
+        handshake,
         gate,
         alive,
         dave_ready,
@@ -338,10 +380,12 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = interval(Duration::from_millis(10));
         let mut installed_epoch = DISARMED_EPOCH;
-        let mut negotiating_since = None;
+        let mut deadline = EncryptionDeadline::default();
+        let mut media_announced = false;
+        let mut waiting_alone = None;
         while alive.load(Ordering::Acquire) && gate.session() == expected_session {
             tick.tick().await;
-            if audio.has_failed() {
+            if audio.get().is_some_and(|audio| audio.has_failed()) {
                 let _ = events.send(TransportEvent::DeviceFailure(
                     "An audio device stopped; reselect the microphone or speaker and reconnect"
                         .into(),
@@ -353,19 +397,76 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                 installed_epoch = DISARMED_EPOCH;
                 driver.mute(true);
                 driver.stop();
-                let since = negotiating_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= DAVE_TIMEOUT {
+                let alone = handshake.idle_without_peer();
+                // Wake the UI when authoritative membership or voice-peer observations
+                // change the waiting explanation, without opening any audio stream.
+                if media_announced || waiting_alone != Some(alone) {
+                    let _ = events.send(TransportEvent::Waiting);
+                    media_announced = false;
+                    waiting_alone = Some(alone);
+                }
+                if alone {
+                    deadline.expired(Instant::now(), true);
+                    continue;
+                }
+                if deadline.expired(Instant::now(), false) {
                     let _ = events.send(TransportEvent::Disconnected {
-                        message:
-                            "DAVE end-to-end encryption could not be renewed; microphone closed"
-                                .into(),
+                        message: format!(
+                            "DAVE handshake stalled: {}; microphone stayed closed",
+                            handshake.summary()
+                        ),
                         retryable: false,
                     });
                     break;
                 }
                 continue;
             }
-            negotiating_since = None;
+            deadline.expired(Instant::now(), true);
+            waiting_alone = None;
+            if audio.get().is_none() {
+                let config = match audio_config.lock() {
+                    Ok(c) => c.clone(),
+                    Err(_) => break,
+                };
+                if let Err(error) = crate::microphone::request_for_join().await {
+                    let _ = events.send(TransportEvent::Disconnected {
+                        message: error.to_string(),
+                        retryable: false,
+                    });
+                    break;
+                }
+                if gate.session() != expected_session
+                    || !alive.load(Ordering::Acquire)
+                    || !dave_ready.load(Ordering::Acquire)
+                {
+                    continue;
+                }
+                let engine = match AudioEngine::start(config, gate.clone()) {
+                    Ok(engine) => Arc::new(engine),
+                    Err(_) => {
+                        let _ = events.send(TransportEvent::DeviceFailure(
+                            "Could not open the selected microphone or speaker".into(),
+                        ));
+                        break;
+                    }
+                };
+                if gate.session() != expected_session || !alive.load(Ordering::Acquire) {
+                    engine.stop();
+                    break;
+                }
+                let _ = playback.set(engine.playback());
+                let _ = audio.set(engine);
+            }
+            let Some(audio) = audio.get() else {
+                break;
+            };
+            if !dave_ready.load(Ordering::Acquire) {
+                continue;
+            }
+            if !media_announced {
+                let _ = events.send(TransportEvent::Ready);
+                media_announced = true;
+            }
             let epoch = gate.epoch();
             if epoch != installed_epoch {
                 // The packet callback has already blocked the old epoch synchronously.
@@ -402,6 +503,38 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
                         break;
                     }
                 };
+                // RawAdapter supplies a container header, not a PCM decoder.
+                // Confirm the production codec registry can prepare this source
+                // before attaching/arming it. Otherwise Songbird drops an errored
+                // track asynchronously while the capture meter keeps moving.
+                let input = match timeout(
+                    Duration::from_secs(2),
+                    input.make_playable_async(
+                        driver.config().codec_registry,
+                        driver.config().format_registry,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(input)) => input,
+                    _ => {
+                        let _ = events.send(TransportEvent::Disconnected {
+                            message: "Microphone audio processing could not start; reconnect to try again".into(),
+                            retryable: false,
+                        });
+                        break;
+                    }
+                };
+                // Preparation yields; a mute, leave, or MLS transition may have
+                // revoked this source's authority in the meantime.
+                if gate.session() != expected_session
+                    || !alive.load(Ordering::Acquire)
+                    || !dave_ready.load(Ordering::Acquire)
+                    || gate.epoch() != epoch
+                    || !gate.transmit_allowed()
+                {
+                    continue;
+                }
                 let track = driver.play_only_input(input);
                 let arm = armed.clone();
                 // This action runs on the mixer, after the old track has been replaced.
@@ -422,7 +555,9 @@ fn spawn_monitor(mut driver: Driver, state: MonitorState) -> JoinHandle<()> {
             }
         }
         armed.store(DISARMED_EPOCH, Ordering::Release);
-        audio.stop();
+        if let Some(audio) = audio.get() {
+            audio.stop();
+        }
         alive.store(false, Ordering::Release);
         driver.mute(true);
         driver.stop();
@@ -554,45 +689,181 @@ fn checked_connection(info: VoiceConnection) -> Result<ConnectionInfo> {
         NonZeroU64::new(id)
             .ok_or_else(|| anyhow!("Voice connection contains an invalid Discord ID"))
     };
-    let endpoint = info
-        .endpoint
-        .strip_prefix("wss://")
-        .unwrap_or(&info.endpoint)
-        .trim_end_matches(":443");
-    if endpoint.is_empty()
-        || endpoint.len() > 253
-        || !endpoint
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        || !(endpoint.ends_with(".discord.media") || endpoint.ends_with(".discord.gg"))
-    {
-        bail!("Gateway supplied an invalid Discord voice endpoint");
-    }
+    let endpoint = checked_endpoint(&info.endpoint)?;
     if info.session_id.is_empty() || info.token.is_empty() {
         bail!("Voice credentials are incomplete");
     }
     Ok(ConnectionInfo {
         channel_id: nz(info.channel_id)?.into(),
-        guild_id: nz(info.guild_id)?.into(),
+        guild_id: info.guild_id.map(|id| nz(id).map(Into::into)).transpose()?,
         user_id: nz(info.user_id)?.into(),
-        endpoint: endpoint.to_owned(),
+        endpoint,
         session_id: info.session_id,
         token: info.token,
     })
 }
 
+/// Accept only a Discord voice authority; Songbird always supplies `wss://`.
+/// Discord's voice documentation includes an explicit :2048 authority. Keep
+/// that port instead of rejecting it or silently connecting to a different one.
+fn checked_endpoint(raw: &str) -> Result<String> {
+    let authority = raw.strip_prefix("wss://").unwrap_or(raw);
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if host.is_empty()
+        || host.len() > 253
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        bail!("Discord supplied a malformed voice server address. Rejoin voice.");
+    }
+    let host = host.to_ascii_lowercase();
+    if !(host.ends_with(".discord.media") || host.ends_with(".discord.gg")) {
+        bail!("Discord supplied an untrusted voice server address. Rejoin voice.");
+    }
+    match port {
+        None | Some("443") => Ok(host),
+        Some(port) => {
+            // The authenticated account Gateway chooses the WSS authority.
+            // Discord does not define a fixed signaling-port allowlist. This
+            // port is separate from the UDP media port in Voice Ready.
+            let valid = !port.is_empty()
+                && port.len() <= 5
+                && !port.starts_with('0')
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|n| n != 0);
+            if !valid {
+                bail!("Discord supplied a malformed voice server port. No connection attempted.");
+            }
+            Ok(format!("{host}:{port}"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DriverPulse(UnboundedSender<()>);
+
+    #[async_trait]
+    impl EventHandler for DriverPulse {
+        async fn act(&self, _: &EventContext<'_>) -> Option<Event> {
+            let _ = self.0.send(());
+            None
+        }
+    }
+
+    fn pending_with_pulse() -> (
+        PendingDriver,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::Weak<()>,
+    ) {
+        // A private scheduler keeps this test independent of other tests' runtimes.
+        let scheduler = songbird::driver::Scheduler::default();
+        let mut config = Config::default().scheduler(scheduler);
+        let lifetime = Arc::new(());
+        let disposed = Arc::downgrade(&lifetime);
+        config.packet_gate = Some(Arc::new(move || {
+            let _keep_alive = &lifetime;
+            false
+        }));
+        let mut driver = Driver::new(config);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        driver.add_global_event(
+            Event::Periodic(Duration::from_millis(20), None),
+            DriverPulse(tx),
+        );
+        (
+            PendingDriver {
+                driver: Some(driver),
+            },
+            rx,
+            disposed,
+        )
+    }
+
+    async fn pulse(rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
+        assert_eq!(
+            timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("driver stopped ticking"),
+            Some(()),
+            "driver destroyed its registered event handler"
+        );
+    }
+
+    async fn driver_stopped(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+        disposed: &std::sync::Weak<()>,
+    ) {
+        timeout(Duration::from_secs(2), async {
+            while rx.recv().await.is_some() {}
+            while disposed.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("driver left background tasks running");
+    }
+
+    #[tokio::test]
+    async fn successful_pending_driver_handoff_preserves_running_tasks() {
+        let (pending, mut ticks, disposed) = pending_with_pulse();
+        pulse(&mut ticks).await;
+        let driver = pending.into_driver();
+        // The old clone/drop handoff poisons the core and destroys this handler.
+        // Several real scheduler ticks exercise the surviving core/mixer/event loop.
+        for _ in 0..3 {
+            pulse(&mut ticks).await;
+        }
+        assert!(disposed.upgrade().is_some());
+        drop(driver);
+        driver_stopped(&mut ticks, &disposed).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_driver_stops_running_tasks() {
+        let (pending, mut ticks, disposed) = pending_with_pulse();
+        pulse(&mut ticks).await;
+        let setup = tokio::spawn(async move {
+            let _pending = pending;
+            std::future::pending::<()>().await;
+        });
+        setup.abort();
+        assert!(setup.await.unwrap_err().is_cancelled());
+        driver_stopped(&mut ticks, &disposed).await;
+    }
+
     fn credentials() -> VoiceConnection {
         VoiceConnection {
-            guild_id: 1,
+            guild_id: Some(1),
             channel_id: 2,
             user_id: 3,
             session_id: "private-session".into(),
             endpoint: "wss://voice.discord.media:443".into(),
             token: "private-token".into(),
         }
+    }
+    #[test]
+    fn solo_wait_has_no_media_deadline_but_peer_join_is_bounded() {
+        let start = Instant::now();
+        let mut deadline = EncryptionDeadline::default();
+        assert!(!deadline.expired(start, true));
+        assert!(!deadline.expired(start + Duration::from_secs(60), true));
+        assert!(!deadline.expired(start + Duration::from_secs(61), false));
+        assert!(deadline.expired(start + Duration::from_secs(76), false));
+        assert!(!deadline.expired(start + Duration::from_secs(77), true));
+        assert!(!deadline.expired(start + Duration::from_secs(78), false));
     }
     #[test]
     fn connection_debug_never_exposes_credentials() {
@@ -607,15 +878,82 @@ mod tests {
         assert_eq!(info.endpoint, "voice.discord.media");
     }
     #[test]
+    fn private_call_uses_channel_as_voice_server_id_without_a_guild() {
+        let mut info = credentials();
+        info.guild_id = None;
+        let info = checked_connection(info).unwrap();
+        assert!(info.guild_id.is_none());
+        assert_eq!(info.channel_id.0.get(), 2);
+        assert_eq!(info.server_id().0, 2);
+        assert_eq!(checked_connection(credentials()).unwrap().server_id().0, 1);
+    }
+    #[test]
     fn rejects_credential_forwarding_endpoints_without_echoing_them() {
         for endpoint in [
             "attacker.example",
             "discord.media.attacker.example",
             "private-token@voice.discord.media",
             "voice.discord.media/private-token",
+            "ws://voice.discord.media",
+            "https://voice.discord.media",
+            "voice.discord.media:443/private-token",
+            "voice.discord.media?token=private-token",
+            "voice.discord.media#private-token",
+            "127.0.0.1:443",
+            "[::1]:443",
+            "voice..discord.media",
+            "-voice.discord.media",
+            "voice-.discord.media",
+            "voice.discord.media.",
         ] {
             let mut info = credentials();
             info.endpoint = endpoint.into();
+            let error = checked_connection(info).unwrap_err().to_string();
+            assert!(!error.contains("private-token"));
+        }
+    }
+    #[test]
+    fn supports_discord_voice_authorities_with_documented_ports() {
+        for (endpoint, expected) in [
+            (
+                "sweetwater-12345.discord.media:2048",
+                "sweetwater-12345.discord.media:2048",
+            ),
+            (
+                "wss://sweetwater-12345.discord.media:2048",
+                "sweetwater-12345.discord.media:2048",
+            ),
+            (
+                "eu-central396.discord.media:80",
+                "eu-central396.discord.media:80",
+            ),
+            ("voice.discord.media:8443", "voice.discord.media:8443"),
+            ("voice.discord.media:50000", "voice.discord.media:50000"),
+            ("voice.discord.media:65535", "voice.discord.media:65535"),
+            ("voice.discord.gg", "voice.discord.gg"),
+            ("wss://VOICE.DISCORD.MEDIA:443", "voice.discord.media"),
+        ] {
+            let mut info = credentials();
+            info.endpoint = endpoint.into();
+            assert_eq!(checked_connection(info).unwrap().endpoint, expected);
+        }
+    }
+    #[test]
+    fn rejects_noncanonical_or_out_of_range_voice_ports() {
+        for port in [
+            "",
+            "0",
+            "65536",
+            "-443",
+            "+443",
+            "0443",
+            "443:443",
+            "443:80",
+            "443/",
+            "private-token",
+        ] {
+            let mut info = credentials();
+            info.endpoint = format!("voice.discord.media:{port}");
             let error = checked_connection(info).unwrap_err().to_string();
             assert!(!error.contains("private-token"));
         }

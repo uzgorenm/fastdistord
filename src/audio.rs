@@ -40,6 +40,8 @@ const SUPPRESSED: u64 = 4;
 const PTT_ENABLED: u64 = 8;
 const PTT_DOWN: u64 = 16;
 const PTT_KNOWN: u64 = 32;
+const ENCRYPTION_PENDING: u64 = 64;
+const REMOTE_MUTED: u64 = 128;
 const FLAGS_MASK: u64 = 0xff;
 const TX_GENERATION_MASK: u64 = ((1_u64 << 28) - 1) << 8;
 const RX_GENERATION_MASK: u64 = ((1_u64 << 28) - 1) << 36;
@@ -67,7 +69,7 @@ struct GateSnapshot(u64);
 
 impl GateSnapshot {
     fn allowed(self) -> bool {
-        self.0 & (MUTED | DEAFENED | SUPPRESSED) == 0
+        self.0 & (MUTED | DEAFENED | SUPPRESSED | ENCRYPTION_PENDING | REMOTE_MUTED) == 0
             && (self.0 & PTT_ENABLED == 0
                 || self.0 & (PTT_DOWN | PTT_KNOWN) == PTT_DOWN | PTT_KNOWN)
     }
@@ -120,8 +122,31 @@ impl TxGate {
     pub fn set_deafened(&self, value: bool) {
         self.flag(DEAFENED, value);
     }
+    pub fn set_remote_muted(&self, value: bool) {
+        self.change(|flags| {
+            if value {
+                (flags | REMOTE_MUTED) & !(PTT_DOWN | PTT_KNOWN)
+            } else {
+                flags & !REMOTE_MUTED
+            }
+        });
+    }
     pub fn set_suppressed(&self, value: bool) {
         self.flag(SUPPRESSED, value);
+    }
+    /// Separate from server suppression: a DAVE transition invalidates capture
+    /// and held PTT synchronously without clearing an administrator's gate.
+    pub fn set_encryption_pending(&self, pending: bool) {
+        self.change(|flags| {
+            if pending {
+                (flags | ENCRYPTION_PENDING) & !(PTT_DOWN | PTT_KNOWN)
+            } else {
+                flags & !ENCRYPTION_PENDING
+            }
+        });
+    }
+    pub fn encryption_pending(&self) -> bool {
+        self.snapshot().0 & ENCRYPTION_PENDING != 0
     }
     pub fn is_muted(&self) -> bool {
         self.snapshot().0 & MUTED != 0
@@ -230,7 +255,11 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>> {
     Ok(result)
 }
 
-fn select_device(host: &cpal::Host, selector: Option<&str>, input: bool) -> Result<cpal::Device> {
+pub(crate) fn select_device(
+    host: &cpal::Host,
+    selector: Option<&str>,
+    input: bool,
+) -> Result<cpal::Device> {
     let kind = if input { "input" } else { "output" };
     let Some(selector) = selector else {
         return (if input {
@@ -273,7 +302,7 @@ fn supported_format(format: SampleFormat) -> bool {
     )
 }
 
-fn select_config(device: &cpal::Device, input: bool) -> Result<SupportedStreamConfig> {
+pub(crate) fn select_config(device: &cpal::Device, input: bool) -> Result<SupportedStreamConfig> {
     // Prefer the OS default for route/channel semantics. A rate conversion is
     // cheaper than accidentally selecting a surround/loopback route.
     let default = if input {
@@ -598,7 +627,7 @@ struct ReaderShared {
 }
 
 /// A nonblocking, non-seekable 48 kHz mono f32-LE stream for Songbird RawAdapter.
-/// Reads return at most 10 ms; underflow becomes silence. Songbird's mixer clock
+/// Reads stop at each 10 ms boundary; underflow becomes silence. Songbird's mixer clock
 /// paces consumption. Sleeping here would block its synchronous packet decoder.
 /// This does not retract samples already buffered inside Songbird: the transport
 /// must gate outgoing packets and recreate its source on gate epoch changes.
@@ -618,7 +647,12 @@ impl Read for InputReader {
         if self.inner.shared.stopped.load(Ordering::Acquire) {
             return Ok(0);
         }
-        let count = output.len().min(BLOCK_FRAMES * 4);
+        // A decoder ring-wrap can request only part of a capture block. Finish
+        // that block on the next read instead of letting read-ahead cross into
+        // the next capture period and permanently buffer its missing audio as zeros.
+        let block_bytes = BLOCK_FRAMES * size_of::<f32>();
+        let remaining = block_bytes - (self.position % block_bytes as u64) as usize;
+        let count = output.len().min(remaining);
         let snapshot = self.inner.shared.gate.snapshot();
         let mut consumer = self
             .inner
@@ -1204,6 +1238,126 @@ mod tests {
     }
 
     #[test]
+    fn microphone_reader_decodes_with_production_codecs_and_encodes_opus() {
+        use songbird::input::{AudioStream, LiveInput, RawAdapter, codecs};
+        use symphonia_core::audio::{AudioBufferRef, Signal};
+
+        let (mut producer, reader, gate) = reader_fixture();
+        let samples: Vec<f32> = (0..960)
+            .map(|i| (i as f32 * std::f32::consts::TAU * 440.0 / 48_000.0).sin() * 0.25)
+            .collect();
+        for &sample in &samples {
+            producer
+                .push(CaptureSample {
+                    sample,
+                    epoch: gate.epoch(),
+                })
+                .unwrap();
+        }
+        // Use the runtime registry, not a test-only decoder or enabled test feature.
+        let mut input = LiveInput::Raw(AudioStream {
+            input: Box::new(RawAdapter::new(reader, 48_000, 1)),
+        })
+        .promote(codecs::get_codec_registry(), codecs::get_probe())
+        .expect("production microphone PCM decoder is missing");
+        let parsed = input.parsed_mut().unwrap();
+        let packet = parsed.format.next_packet().unwrap();
+        let AudioBufferRef::F32(decoded) = parsed.decoder.decode(&packet).unwrap() else {
+            panic!("microphone stream must decode as f32 PCM");
+        };
+        assert_eq!(decoded.spec().rate, 48_000);
+        assert_eq!(decoded.spec().channels.count(), 1);
+        assert_eq!(decoded.chan(0), samples);
+        let mut encoder = songbird::driver::opus::Encoder::new(
+            48_000,
+            songbird::driver::opus::Channels::Mono,
+            songbird::driver::opus::Application::Audio,
+        )
+        .unwrap();
+        let mut opus = [0_u8; 1276];
+        let len = encoder.encode_float(decoded.chan(0), &mut opus).unwrap();
+        assert!(
+            len > 3,
+            "synthetic speech must produce a non-silence Opus packet"
+        );
+        let mut decoder =
+            songbird::driver::opus::Decoder::new(48_000, songbird::driver::opus::Channels::Mono)
+                .unwrap();
+        let mut received = [0_f32; 960];
+        assert_eq!(
+            decoder
+                .decode_float(&opus[..len], &mut received, false)
+                .unwrap(),
+            960
+        );
+        assert!(received.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn continuous_microphone_packets_do_not_prefetch_future_silence() {
+        use songbird::input::{AudioStream, LiveInput, RawAdapter, codecs};
+        use symphonia_core::audio::{AudioBufferRef, Signal};
+
+        let (mut producer, reader, gate) = reader_fixture();
+        let mut input = LiveInput::Raw(AudioStream {
+            input: Box::new(RawAdapter::new(reader, 48_000, 1)),
+        })
+        .promote(codecs::get_codec_registry(), codecs::get_probe())
+        .unwrap();
+        let parsed = input.parsed_mut().unwrap();
+        // Feed precisely one 20 ms capture period before each mixer read. This
+        // crosses Symphonia's ring boundary repeatedly without a device or clock.
+        for frame in 0..200 {
+            let value = 0.25 + (frame % 4) as f32 * 0.125;
+            for _ in 0..960 {
+                producer
+                    .push(CaptureSample {
+                        sample: value,
+                        epoch: gate.epoch(),
+                    })
+                    .unwrap();
+            }
+            let packet = parsed.format.next_packet().unwrap();
+            let AudioBufferRef::F32(decoded) = parsed.decoder.decode(&packet).unwrap() else {
+                panic!("microphone must decode to f32");
+            };
+            assert_eq!(decoded.frames(), 960);
+            assert!(
+                decoded.chan(0).iter().all(|s| *s == value),
+                "capture frame {frame} contains stale samples or synthesized silence"
+            );
+        }
+    }
+
+    #[test]
+    fn discord_mute_confirmation_cycle_revokes_queued_pcm_and_held_ptt() {
+        let (mut producer, mut reader, gate) = reader_fixture();
+        producer
+            .push(CaptureSample {
+                sample: 0.75,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        gate.set_remote_muted(true);
+        assert!(!gate.transmit_allowed());
+        gate.set_remote_muted(false);
+        producer
+            .push(CaptureSample {
+                sample: 0.25,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        let mut bytes = [0; 4];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(f32::from_le_bytes(bytes), 0.25);
+        gate.set_ptt_enabled(true);
+        gate.set_ptt_pressed(Some(true));
+        assert!(gate.transmit_allowed());
+        gate.set_remote_muted(true);
+        gate.set_remote_muted(false);
+        assert!(!gate.transmit_allowed());
+    }
+    #[test]
     fn starts_muted_and_suppressed() {
         let gate = TxGate::default();
         assert!(gate.is_muted());
@@ -1252,6 +1406,39 @@ mod tests {
         gate.set_deafened(true);
         gate.set_deafened(false);
         assert!(gate.is_muted());
+    }
+    #[test]
+    fn encryption_transition_discards_capture_and_does_not_clear_admin_or_ptt_gates() {
+        let (mut producer, mut reader, gate) = reader_fixture();
+        producer
+            .push(CaptureSample {
+                sample: 0.75,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        let before = gate.epoch();
+        gate.set_encryption_pending(true);
+        assert!(!gate.transmit_allowed());
+        gate.set_suppressed(true);
+        gate.set_encryption_pending(false);
+        assert!(!gate.transmit_allowed());
+        gate.set_suppressed(false);
+        assert_ne!(before, gate.epoch());
+        producer
+            .push(CaptureSample {
+                sample: 0.25,
+                epoch: gate.epoch(),
+            })
+            .unwrap();
+        let mut bytes = [0; 8];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0.25);
+        gate.set_ptt_enabled(true);
+        gate.set_ptt_pressed(Some(true));
+        assert!(gate.transmit_allowed());
+        gate.set_encryption_pending(true);
+        gate.set_encryption_pending(false);
+        assert!(!gate.transmit_allowed());
     }
     #[test]
     fn mute_cycle_invalidates_queued_capture() {
